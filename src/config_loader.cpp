@@ -90,12 +90,7 @@ std::vector<Motor_CAN_Info_Struct> MotorConfigLoader::loadConfig(const std::stri
 
         get_val(m.api_type, "api_type");
         get_val(m.chan, "chan");
-        get_str(m.device_name, "device", false);
-        if (m.device_name.empty()) {
-            m.device_name = "can" + std::to_string(m.chan);
-            std::cerr << "[Warn] Motor entry " << index
-                      << ": Missing key 'device', fallback to '" << m.device_name << "'." << std::endl;
-        }
+        m.device_name = "can" + std::to_string(m.chan);
         get_val(m.canid, "canid");
 
         // 2. Physics Params

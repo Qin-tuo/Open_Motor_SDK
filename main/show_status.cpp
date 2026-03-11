@@ -7,7 +7,7 @@
 
 int main() {
     // 1. 初始化机器人
-    std::string package_share_directory = ament_index_cpp::get_package_share_directory("rmrobot");
+    std::string package_share_directory = ament_index_cpp::get_package_share_directory("khcan");
     std::string toml_path = package_share_directory + "/config/motor.toml";
     const std::string config_path = toml_path;
     BaseRobot robot(config_path);
