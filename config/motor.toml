@@ -1,0 +1,8 @@
+motors = [
+  { num = 1, name = "R_1", type = "LZRS06", api_type = 1, chan = 1, canid = 4, p_min = -12.57, p_max = 12.57, v_min = -50, v_max = 50, kp_min = 0, kp_max = 5000, kd_min = 0, kd_max = 100, t_min = -36, t_max = 36, kp_in_use = 50, kd_in_use = 0.5, pos_min = 0.0, pos_max = 0.0 },
+  { num = 2, name = "R_2", type = "LZRS06", api_type = 1, chan = 1, canid = 3, p_min = -12.57, p_max = 12.57, v_min = -50, v_max = 50, kp_min = 0, kp_max = 5000, kd_min = 0, kd_max = 100, t_min = -36, t_max = 36, kp_in_use = 50, kd_in_use = 0.5, pos_min = 0.0, pos_max = 0.0 },
+  { num = 3, name = "L_3", type = "LZRS06", api_type = 1, chan = 4, canid = 2, p_min = -12.57, p_max = 12.57, v_min = -50, v_max = 50, kp_min = 0, kp_max = 5000, kd_min = 0, kd_max = 100, t_min = -36, t_max = 36, kp_in_use = 50, kd_in_use = 0.5, pos_min = 0.0, pos_max = 0.0 },
+  { num = 4, name = "L_4", type = "LZRS06", api_type = 1, chan = 4, canid = 1, p_min = -12.57, p_max = 12.57, v_min = -50, v_max = 50, kp_min = 0, kp_max = 5000, kd_min = 0, kd_max = 100, t_min = -36, t_max = 36, kp_in_use = 50, kd_in_use = 0.5, pos_min = 0.0, pos_max = 0.0 },
+  { num = 5, name = "R_Foot", type = "LK9025", api_type = 2, chan = 3, canid = 1, p_min = 0, p_max = 0, v_min = 0, v_max = 0, kp_min = 0, kp_max = 0, kd_min = 0, kd_max = 0, t_min = 0, t_max = 0, kp_in_use = 0, kd_in_use = 1, pos_min = 0.0, pos_max = 0.0 },
+  { num = 6, name = "L_Foot", type = "LK9025", api_type = 2, chan = 2, canid = 2, p_min = 0, p_max = 0, v_min = 0, v_max = 0, kp_min = 0, kp_max = 0, kd_min = 0, kd_max = 0, t_min = 0, t_max = 0, kp_in_use = 0, kd_in_use = 1, pos_min = 0.0, pos_max = 0.0 },
+]
