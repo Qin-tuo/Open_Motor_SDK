@@ -41,7 +41,7 @@ struct Motor_CAN_Receive_Struct
 {
     uint8_t master_id;
     uint8_t motor_id;
-    uint8_t fault_message;
+    uint32_t fault_message;
     uint8_t motor_state;
     uint8_t mode;
 
@@ -62,7 +62,7 @@ struct Motor_CAN_Receive_Struct
         current_speed_f = 0.0f;
         current_torque_f = 0.0f;
         current_temp_f = 0.0f;
-        current_iq_f;
+        current_iq_f = 0.0f;
     }
 
     Motor_CAN_Receive_Struct(const Motor_CAN_Receive_Struct &other)
@@ -100,22 +100,36 @@ struct Motor_CAN_Receive_Struct
 
 typedef struct
 {
-    int num;
+    int num = 0;
     std::string name;
     std::string type;
-    int api_type;
+    int api_type = 0;
     std::string device_name;
-    int device_index;
-    int chan;
-    int canid;
+    int device_index = -1;
+    int chan = 0;
+    int canid = 0;
 
-    float p_min, p_max;
-    float v_min, v_max;
-    float kp_min, kp_max;
-    float kd_min, kd_max;
-    float t_min, t_max;
-    float kp_in_use, kd_in_use;
-    float pos_min, pos_max;
+    float p_min = 0.0f, p_max = 0.0f;
+    float v_min = 0.0f, v_max = 0.0f;
+    float kp_min = 0.0f, kp_max = 0.0f;
+    float kd_min = 0.0f, kd_max = 0.0f;
+    float t_min = 0.0f, t_max = 0.0f;
+    float kp_in_use = 0.0f, kd_in_use = 0.0f;
+    float pos_min = 0.0f, pos_max = 0.0f;
+
+    float type5_rated_torque_nm = 0.0f;
+    float type5_peak_torque_nm = 0.0f;
+    float type5_torque_constant = 0.0f;
+    float type5_encoder_cpr = 65536.0f;
+    float type5_dir_sign = 1.0f;
+    float type5_zero_offset_rad = 0.0f;
+    int type5_mode_position = 1;
+    int type5_mode_speed = 3;
+    int type5_mode_current = 4;
+    bool type5_fast_write = true;
+    float type5_profile_velocity = 0.0f;
+    float type5_profile_acc = 0.0f;
+    float type5_profile_dec = 0.0f;
     
 } Motor_CAN_Info_Struct;
 

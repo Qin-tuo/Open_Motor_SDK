@@ -1,147 +1,143 @@
-# OS 兼容性说明
-本代码默认配置为 **Arm 架构**（如 Raspberry Pi, Jetson 等）。
-- **Intel (x86_64) 架构运行时**：需要替换 `lib` 目录下的 `.so` 文件。
-- 对应的 Intel 版本库文件可以在 `/lib_sdk` 目录中找到，请手动覆盖。
+# motor_driver
 
----
-# 前期准备
-本程序需要与肥猫机器人公司USB2CAN模块配合使用，请准备好模块与模块说明书、模块SDK，并按照说明书使用install.sh文件安装USB2CAN规则文件，或手动安装规则文件，安装方法：
+多协议电机 CAN 驱动与示例程序，统一通过 `BaseRobot` 控制。
 
-```cpp
-// 进入项目目录下的can文件夹
-cd USB2CAN-Demo-Lingzu/can
+## 1. 环境与依赖
 
-// 复制规则文件usb_can.rules 到/etc/udev/rules.d/
-sudo cp usb_can.rules /etc/udev/rules.d/
+- 系统：Linux
+- 编译：CMake + C++17
+- 设备：USB2CAN（`usb_can` SDK）
+- 依赖：ROS2 `ament_cmake` 体系（见 `CMakeLists.txt`）
 
+## 2. 编译
 
-// 运行下面的命令，使udev规则生效
-sudo udevadm trigger
+```bash
+mkdir -p build
+cmake -S . -B build
+cmake --build build -j4
 ```
 
-# 接口使用说明
+编译后可执行文件在 `build/` 下：
 
-可直接 
-mkdir build
-cmake ..
-make -j2
-会得到两个可执行文件：lingzu_robot   show_status
-./show_status会返回所有电机当前的位置，50hz，同时所有电机不会移动。
-./lingzu_robot 会执行测试程序，测试所有电机目前运动是否正常。 
-（注：可执行文件需要 chmod +x ）
+- `lingzu_robot`
+- `show_status`
+- `eyou_test`
+- `encos_test`
 
-## 1. 标准调用流程 (Pipeline)
-使用 `BaseRobot` 进行开发的标准流程如下：
+## 3. 可执行程序
 
-1.  **初始化**：通过配置文件路径（如 `.csv`）创建 `BaseRobot` 对象。
-2.  **清除故障**：调用 `ClearError_All()` 确保所有电机无故障状态。
-3.  **使能电机（可选）**：
-    * **主动控制模式**：调用 `EnableAll()` 上电，电机将进入硬连接状态。
-    * **被动监控模式**：**不要**调用 `EnableAll()`。此时电机处于无力状态，可以用手掰动，配合 `QueryPos` 接口可作为示教器使用。
-4.  **设置模式**：
-    * 调用 `SetModeAll_Type1(...)` 设置灵足 (LimX) 电机模式。
-    * 调用 `SetModeAll_Type2(...)` 设置 LK (宇树旧版) 电机模式。
-    * *注意：不同品牌电机的模式定义不同，请参考下文[控制模式定义]章节。*
-5.  **循环控制**：构建 `MotorCmdVec` 向量，调用 `robot.Move(cmds)` 下发指令。
-6.  **结束**：调用 `DisableAll()` 下电。
+### `show_status`
 
-示例代码入口可参考：`main_exec.cpp`
+- 作用：循环查询并打印状态（默认 50Hz）。
+- 默认配置：`config/motor.toml`
+- 注意：该程序只查询状态，不会下发运动轨迹。
 
----
-
-## 2. 关键数据结构
-
-### `MotorCmdVec`
-用于控制单个电机的指令结构体，包含以下三个成员。根据设置的模式不同，需要填充对应的成员：
-
-```cpp
-struct MotorCmdVec {
-    float p; // Position (位置，单位：rad)
-    float v; // Speed    (速度，单位：rad/s)
-    float t; // Torque   (力矩，单位：Nm)
-};
+```bash
+./build/show_status
 ```
 
-* **控制速度时**：请设置 `.v` (Type 1 和 Type 2 均适用)。
-* **控制位置时**：请设置 `.p` (Type 1 和 Type 2 均适用)。
-* **控制力矩时**：请设置 `.t` (Type 1 和 Type 2 均适用)。
+### `lingzu_robot`
 
----
+- 作用：通用示例入口（`main/main_exec.cpp`）。
+- 默认配置：`config/motor.toml`
 
-## 3. 控制模式定义 (Mode Map)
-
-**⚠️ 警告：Type 1 (灵足) 和 Type 2 (LK) 的模式 ID 定义不一致，请务必区分设置！**
-
-### 【Type 1: LimX / 灵足协议】
-| 模式 ID | 模式名称 | 说明 |
-| :--- | :--- | :--- |
-| **0** | **运控模式 (MIT)** | 混合控制 (P, V, T, Kp, Kd) |
-| **1** | **位置模式** | 纯位置闭环 |
-| **2** | **速度模式** | 纯速度闭环 |
-| **3** | **电流/力矩模式** | 直接力矩控制 |
-
-### 【Type 2: LK / 宇树旧协议】
-| 模式 ID | 模式名称 | 对应指令 | 说明 |
-| :--- | :--- | :--- | :--- |
-| **1** | **力矩/混合模式** | `0xA1` | 对应 Type1 的模式 0 (MIT) |
-| **2** | **位置模式** | `0xA3` | 对应 Type1 的模式 1 |
-| **3** | **速度模式** | `0xA2` | 对应 Type1 的模式 2 |
-| *其他* | *读取状态* | `0x9C` | 仅读取，不控制 |
-
-> **特别注意**：
-> * Type 1 的 **MIT/运控模式** 是 `0`。
-> * Type 2 的 **MIT/力矩模式** 是 `1`。
-
----
-
-## 4. 核心 API 速查
-
-### 初始化与配置
-```cpp
-// 构造函数：传入配置文件路径
-BaseRobot robot("config_file.csv");
-
-// 清除所有电机错误（建议启动时优先调用）
-robot.ClearError_All();
-
-// 设置所有 Type 1 电机的模式
-robot.SetModeAll_Type1(1); // 例如：设置为位置模式
-
-// 设置所有 Type 2 电机的模式
-robot.SetModeAll_Type2(3); // 例如：设置为速度模式
+```bash
+./build/lingzu_robot
 ```
 
-### 启停控制
-```cpp
-// 使能所有电机
-robot.EnableAll();
+### `eyou_test`
 
-// 失能所有电机（停止输出）
-robot.DisableAll();
+- 作用：Type5（PP11）往复测试。
+- 默认配置：`config/motor.toml`
+- 支持传参覆盖配置路径。
+
+```bash
+./build/eyou_test
+./build/eyou_test config/motor.toml
 ```
 
-### 运动控制
-```cpp
-// 准备指令向量（大小需与电机总数一致）
-std::vector<MotorCmdVec> cmds(motor_count);
+### `encos_test`
 
-// 填充指令 (假设电机 0 是 Type 1 位置模式，电机 1 是 Type 2 速度模式)
-cmds[0].p = 3.14; // Set Position
-cmds[1].v = 5.0;  // Set Speed
+- 作用：Type6（ENCOS）MIT 往复测试。
+- 支持传参指定配置路径（建议显式传入）。
 
-// 下发指令
-robot.Move(cmds);
+```bash
+./build/encos_test config/motor.toml
 ```
 
-### 状态反馈
-```cpp
-// 打印所有电机当前状态到控制台
-robot.PrintStatus();
+## 4. 配置文件（TOML）
 
-// 获取所有电机当前位置 (返回 vector<float>)
-auto positions = robot.GetPosAll();
+程序读取 `motors` 数组，每个电机一条记录，例如：
 
-// 获取所有电机当前位置 (返回 vector<float>)
-auto positions = robot.GetPosAll();
-
+```toml
+motors = [
+  { num = 1, name = "ENCOS_JOINT", type = "EC-A4310-P2-36", api_type = 6, device = "USB2CAN2", chan = 1, canid = 1,
+    p_min = -12.5, p_max = 12.5, v_min = -18.0, v_max = 18.0,
+    kp_min = 0.0, kp_max = 500.0, kd_min = 0.0, kd_max = 5.0,
+    t_min = -30.0, t_max = 30.0, kp_in_use = 15.0, kd_in_use = 0.5,
+    pos_min = -12.5, pos_max = 12.5 },
+]
 ```
+
+关键字段说明：
+
+- `num`：电机编号（业务编号）
+- `name`：电机名称
+- `type`：型号字符串（当前在 `api_type=5` 时用于 PP11 默认参数）
+- `api_type`：协议类型
+- `device`：USB2CAN 设备名（实际打开时会拼 `/dev/<device>`）
+- `chan`：CAN 通道号（常见为 `0` 或 `1`，按你的 USB2CAN 定义）
+- `canid`：电机 CAN ID
+- `p_min/p_max`、`v_min/v_max`、`kp_min/kp_max`、`kd_min/kd_max`、`t_min/t_max`：协议映射范围
+- `kp_in_use/kd_in_use`：当前使用的增益（示例程序会读取）
+- `pos_min/pos_max`：上层位置限幅，若无效则回退到 `p_min/p_max`
+
+## 5. 协议类型（`api_type`）
+
+- `1`：Type1（灵足/LimX）
+- `2`：Type2（LK）
+- `3`：Type3（DM）
+- `4`：Type4（RoboMaster C620）
+- `5`：Type5（EYOU PP11）
+- `6`：Type6（ENCOS）
+
+## 6. 统一模式约定
+
+上层统一使用 `SetMode...` 传入：
+
+- `0`：MIT/混合控制
+- `1`：位置模式
+- `2`：速度模式
+- `3`：力矩/电流模式
+
+说明：
+
+- Type1/Type3/Type5/Type6 按上述语义映射。
+- Type2 内部做了协议适配（`0/3` 走混合，`1` 位置，`2` 速度）。
+- Type4 仅支持电流环控制，`mode` 仅作兼容保留。
+
+## 7. Type5（PP11）说明
+
+- 当前默认参数逻辑仅针对 `PP11`。
+- `type` 字段建议填写 `PP11`。
+- 可用以下接口写 PI 参数：
+  - `SetType5CurrentPI_N`
+  - `SetType5SpeedPI_N`
+  - `SetType5PositionPI_N`
+  - `SaveType5Params_N`
+
+## 8. 常见问题
+
+### Q1：`show_status` 看不到返回值
+
+先确认以下几点：
+
+1. 程序启动日志中没有 `Failed to open CAN device`。
+2. `device/chan/canid` 与硬件一致（尤其是 `chan`，很多设备是 `0` 起始）。
+3. 电机与总线为经典 CAN 1Mbps（非 CAN FD）。
+4. 终端电阻、供电、CANH/CANL 接线正确。
+5. 电机 ID 与配置一致（ENCOS 出厂常见 ID 为 `1`，若改过以实际为准）。
+
+### Q2：为什么 `show_status` 不动电机
+
+`show_status` 只做查询和打印，不发送轨迹指令。要做运动测试请使用 `lingzu_robot`、`eyou_test` 或 `encos_test`。

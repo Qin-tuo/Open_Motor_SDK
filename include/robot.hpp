@@ -62,6 +62,10 @@ public:
     void Disable_N(int N);
     int SetKpd_N(float kp, float kd,int N);
     void SetKpd_all(float kp, float kd);
+    int SetType5CurrentPI_N(uint32_t kp, uint32_t ki, int N, bool save = false);
+    int SetType5SpeedPI_N(uint32_t kp, uint32_t ki, int N, bool save = false);
+    int SetType5PositionPI_N(uint32_t kp, uint32_t ki, int N, bool save = false);
+    int SaveType5Params_N(int N);
 
     void ClearError_N(int N);
 
@@ -74,8 +78,11 @@ public:
     void SetModes(std::vector<int>& modes);
     void SetMode_N(int N,int mode);
     //  *  mode: 0-运控, 1-位置, 2-速度, 3-电流
-    void SetModeAll_Type1(int mode);
-    void SetModeAll_Type2(int mode);
+    void SetModeAll_TypeX(int X, int mode);
+    void SetModeAll_Type1(int mode) { SetModeAll_TypeX(1, mode); }
+    void SetModeAll_Type2(int mode) { SetModeAll_TypeX(2, mode); }
+    void SetModeAll_Type5(int mode) { SetModeAll_TypeX(5, mode); }
+    void SetModeAll_Type6(int mode) { SetModeAll_TypeX(6, mode); }
     void QueryPos_ALL();
     void QueryPos_N(int N);
 
@@ -84,5 +91,3 @@ public:
     std::vector<float> GetPosN(int n);
 
 };
-
-

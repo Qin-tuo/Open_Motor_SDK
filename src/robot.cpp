@@ -78,7 +78,7 @@ BaseRobot::BaseRobot(const std::string& config_file) {
             // 可选：检查同一张卡下的电机类型是否一致
             // 这是一个简单的校验，防止一张卡上混插了不同协议的电机（这通常是不允许的）
             // 如果你的硬件确实混插了，可以注释掉下面这段 Warning
-            int current_motor_type = global_motors[i].info.api_type;
+            (void)global_motors[i].info.api_type;
             // 这里我们无法简单地从 BaseDevice* 反推类型，除非加虚函数 getTypeId，
             // 但作为初始化检查，我们假设第一个电机的类型决定了该设备的类型。
         }
@@ -123,6 +123,86 @@ void BaseRobot::SetKpd_all(float kp, float kd) {
         SetKpd_N(kp, kd, i);
     }
     std::cout << "[Info] Set KP=" << kp << ", KD=" << kd << " for all motors." << std::endl;
+}
+
+int BaseRobot::SetType5CurrentPI_N(uint32_t kp, uint32_t ki, int N, bool save) {
+    if (N < 0 || N >= (int)global_motors.size()) {
+        std::cerr << "[Error] Motor index " << N << " out of range." << std::endl;
+        return -1;
+    }
+
+    if (global_motors[N].info.api_type != 5) {
+        std::cerr << "[Error] Motor index " << N << " is not TYPE5." << std::endl;
+        return -2;
+    }
+
+    const int dev_idx = global_motors[N].info.device_index;
+    if (dev_idx < 0 || dev_idx >= (int)devices.size() || !devices[dev_idx]) {
+        std::cerr << "[Error] Device not found for motor index: " << N << std::endl;
+        return -3;
+    }
+
+    return devices[dev_idx]->SetType5CurrentPI(N, kp, ki, save);
+}
+
+int BaseRobot::SetType5SpeedPI_N(uint32_t kp, uint32_t ki, int N, bool save) {
+    if (N < 0 || N >= (int)global_motors.size()) {
+        std::cerr << "[Error] Motor index " << N << " out of range." << std::endl;
+        return -1;
+    }
+
+    if (global_motors[N].info.api_type != 5) {
+        std::cerr << "[Error] Motor index " << N << " is not TYPE5." << std::endl;
+        return -2;
+    }
+
+    const int dev_idx = global_motors[N].info.device_index;
+    if (dev_idx < 0 || dev_idx >= (int)devices.size() || !devices[dev_idx]) {
+        std::cerr << "[Error] Device not found for motor index: " << N << std::endl;
+        return -3;
+    }
+
+    return devices[dev_idx]->SetType5SpeedPI(N, kp, ki, save);
+}
+
+int BaseRobot::SetType5PositionPI_N(uint32_t kp, uint32_t ki, int N, bool save) {
+    if (N < 0 || N >= (int)global_motors.size()) {
+        std::cerr << "[Error] Motor index " << N << " out of range." << std::endl;
+        return -1;
+    }
+
+    if (global_motors[N].info.api_type != 5) {
+        std::cerr << "[Error] Motor index " << N << " is not TYPE5." << std::endl;
+        return -2;
+    }
+
+    const int dev_idx = global_motors[N].info.device_index;
+    if (dev_idx < 0 || dev_idx >= (int)devices.size() || !devices[dev_idx]) {
+        std::cerr << "[Error] Device not found for motor index: " << N << std::endl;
+        return -3;
+    }
+
+    return devices[dev_idx]->SetType5PositionPI(N, kp, ki, save);
+}
+
+int BaseRobot::SaveType5Params_N(int N) {
+    if (N < 0 || N >= (int)global_motors.size()) {
+        std::cerr << "[Error] Motor index " << N << " out of range." << std::endl;
+        return -1;
+    }
+
+    if (global_motors[N].info.api_type != 5) {
+        std::cerr << "[Error] Motor index " << N << " is not TYPE5." << std::endl;
+        return -2;
+    }
+
+    const int dev_idx = global_motors[N].info.device_index;
+    if (dev_idx < 0 || dev_idx >= (int)devices.size() || !devices[dev_idx]) {
+        std::cerr << "[Error] Device not found for motor index: " << N << std::endl;
+        return -3;
+    }
+
+    return devices[dev_idx]->SaveType5Params(N);
 }
 
 
@@ -200,10 +280,6 @@ void BaseRobot::SetMode_N(int N,int mode){
 
         int dev_idx = global_motors[N].info.device_index;
         if (devices[dev_idx]) {
-            if (global_motors[N].info.api_type == 2) {
-            devices[dev_idx]->SetMode(N, mode+1);
-        }
-        else   
             devices[dev_idx]->SetMode(N, mode);
         }
         else std::cout <<"device not found."<<std::endl;
@@ -225,11 +301,11 @@ void BaseRobot::SetModes(std::vector<int>& modes) {
 
 
 
-void BaseRobot::SetModeAll_Type1(int mode) {
+void BaseRobot::SetModeAll_TypeX(int X, int mode) {
     // 遍历所有电机
     for (int i = 0; i < global_motors.size(); i++) {
-        // 【关键】只处理 api_type 为 1 的电机 (通常是 RS/宇树协议)
-        if (global_motors[i].info.api_type == 1) {
+        // 【关键】只处理 api_type 为 X 的电机 (通常是 RS/宇树协议)
+        if (global_motors[i].info.api_type == X) {
             int dev_idx = global_motors[i].info.device_index;
             
             // 确保设备指针有效
@@ -243,25 +319,7 @@ void BaseRobot::SetModeAll_Type1(int mode) {
     }
 }
 
-void BaseRobot::SetModeAll_Type2(int mode) {
-    // 遍历所有电机
-    for (int i = 0; i < global_motors.size(); i++) {
-        // 【关键】只处理 api_type 为 2 的电机 (LK/灵控协议)
-        if (global_motors[i].info.api_type == 2) {
-            int dev_idx = global_motors[i].info.device_index;
-            
-            // 确保设备指针有效
-            if (dev_idx >= 0 && dev_idx < devices.size() && devices[dev_idx]) {
-                // 调用 Device_Type2::SetMode 
-                // (根据之前的实现，这里只是更新内存中的 motor.send.mode，不发送CAN帧)
-                devices[dev_idx]->SetMode(i, mode+1);
-                
-                // 虽然只是更新内存，但保留微小延时是个好习惯，或者可以设得很短
-                std::this_thread::sleep_for(std::chrono::milliseconds(1)); 
-            }
-        }
-    }
-}
+
 
 // 在 .cpp 中实现:
 void BaseRobot::Move_N(int N, const MotorCmdVec& target) {
@@ -274,10 +332,12 @@ void BaseRobot::Move_N(int N, const MotorCmdVec& target) {
     // [优化] 使用引用别名，告诉编译器"这一坨东西就是那个内存地址"
     // 避免后面反复写 global_motors[N] 导致多次计算偏移量
     auto& motor = global_motors[N];
+    const float pos_clip_min = (motor.info.pos_max > motor.info.pos_min) ? motor.info.pos_min : motor.info.p_min;
+    const float pos_clip_max = (motor.info.pos_max > motor.info.pos_min) ? motor.info.pos_max : motor.info.p_max;
 
     // 2. 限幅与赋值
     // 由于 Clip 是 inline 的，这里实际上没有函数调用，全是直接的数学指令
-    motor.send.position = Clip(target.p, motor.info.pos_min, motor.info.pos_max);
+    motor.send.position = Clip(target.p, pos_clip_min, pos_clip_max);
     motor.send.speed    = target.v;
     motor.send.torque   = target.t;
 
@@ -301,9 +361,11 @@ void BaseRobot::Move(const std::vector<MotorCmdVec>& targets) {
         
         // [优化] 获取当前电机对象的引用，后续所有操作都基于这个引用
         auto& motor = global_motors[i]; 
+        const float pos_clip_min = (motor.info.pos_max > motor.info.pos_min) ? motor.info.pos_min : motor.info.p_min;
+        const float pos_clip_max = (motor.info.pos_max > motor.info.pos_min) ? motor.info.pos_max : motor.info.p_max;
 
         // 2. 限幅与赋值 (内联展开，极速)
-        motor.send.position = Clip(cmd.p, motor.info.pos_min, motor.info.pos_max); 
+        motor.send.position = Clip(cmd.p, pos_clip_min, pos_clip_max); 
         motor.send.speed    = cmd.v;
         motor.send.torque   = cmd.t;
         // 3. 发送逻辑

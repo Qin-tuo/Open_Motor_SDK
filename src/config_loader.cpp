@@ -1,4 +1,59 @@
 #include "config_loader.hpp"
+#include <algorithm>
+#include <cctype>
+
+namespace {
+
+std::string toUpperCopy(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::toupper(ch)); });
+    return value;
+}
+
+void applyType5Defaults(Motor_CAN_Info_Struct& motor) {
+    if (motor.api_type != 5) {
+        return;
+    }
+
+    if (std::fabs(motor.type5_dir_sign) < 1e-6f) {
+        motor.type5_dir_sign = 1.0f;
+    }
+    if (motor.type5_encoder_cpr <= 0.0f) {
+        motor.type5_encoder_cpr = 65536.0f;
+    }
+
+    const std::string motor_type = toUpperCopy(motor.type);
+    if (motor_type.find("PP11") != std::string::npos) {
+        if (motor.type5_rated_torque_nm <= 0.0f) motor.type5_rated_torque_nm = 6.6f;
+        if (motor.type5_peak_torque_nm <= 0.0f) motor.type5_peak_torque_nm = 21.0f;
+        if (motor.type5_torque_constant <= 0.0f) motor.type5_torque_constant = 2.2f;
+        if (motor.type5_profile_velocity <= 0.0f) motor.type5_profile_velocity = 5.235988f;
+        if (motor.type5_profile_acc <= 0.0f) motor.type5_profile_acc = 20.0f;
+        if (motor.type5_profile_dec <= 0.0f) motor.type5_profile_dec = 20.0f;
+    }
+
+    if (motor.t_max <= motor.t_min && motor.type5_peak_torque_nm > 0.0f) {
+        motor.t_min = -motor.type5_peak_torque_nm;
+        motor.t_max = motor.type5_peak_torque_nm;
+    }
+
+    if (motor.pos_max <= motor.pos_min && motor.p_max > motor.p_min) {
+        motor.pos_min = motor.p_min;
+        motor.pos_max = motor.p_max;
+    }
+
+    if (motor.type5_profile_velocity <= 0.0f) {
+        motor.type5_profile_velocity = std::max(std::fabs(motor.v_min), std::fabs(motor.v_max));
+    }
+    if (motor.type5_profile_acc <= 0.0f) {
+        motor.type5_profile_acc = (motor.type5_profile_velocity > 0.0f) ? motor.type5_profile_velocity : 1.0f;
+    }
+    if (motor.type5_profile_dec <= 0.0f) {
+        motor.type5_profile_dec = (motor.type5_profile_velocity > 0.0f) ? motor.type5_profile_velocity : 1.0f;
+    }
+}
+
+} // namespace
 // 引入 toml++ 头文件 (你需要确保已经下载并放置在正确路径)
 
 // toml++ 不需要手动写 trim，也不需要 split，逻辑会大幅简化
@@ -96,6 +151,23 @@ std::vector<Motor_CAN_Info_Struct> MotorConfigLoader::loadConfig(const std::stri
         // 3. New Fields (新增字段)
         get_val(m.pos_min, "pos_min");
         get_val(m.pos_max, "pos_max");
+
+        // 4. Optional Type5 Fields (PP11 / 行星V3)
+        get_val(m.type5_rated_torque_nm, "type5_rated_torque_nm", false);
+        get_val(m.type5_peak_torque_nm, "type5_peak_torque_nm", false);
+        get_val(m.type5_torque_constant, "type5_torque_constant", false);
+        get_val(m.type5_encoder_cpr, "type5_encoder_cpr", false);
+        get_val(m.type5_dir_sign, "type5_dir_sign", false);
+        get_val(m.type5_zero_offset_rad, "type5_zero_offset_rad", false);
+        get_val(m.type5_mode_position, "type5_mode_position", false);
+        get_val(m.type5_mode_speed, "type5_mode_speed", false);
+        get_val(m.type5_mode_current, "type5_mode_current", false);
+        get_val(m.type5_fast_write, "type5_fast_write", false);
+        get_val(m.type5_profile_velocity, "type5_profile_velocity", false);
+        get_val(m.type5_profile_acc, "type5_profile_acc", false);
+        get_val(m.type5_profile_dec, "type5_profile_dec", false);
+
+        applyType5Defaults(m);
 
         motor_list.push_back(m);
     }

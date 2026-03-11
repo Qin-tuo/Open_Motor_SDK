@@ -36,12 +36,19 @@ public:
     void ClearError(int& motor_index) ;
     void SetMode(int& motor_index, int mode) ;
     void QueryPos(int& motor_index);
+    int SetType5CurrentPI(int& motor_index, uint32_t kp, uint32_t ki, bool save = false);
+    int SetType5SpeedPI(int& motor_index, uint32_t kp, uint32_t ki, bool save = false);
+    int SetType5PositionPI(int& motor_index, uint32_t kp, uint32_t ki, bool save = false);
+    int SaveType5Params(int& motor_index);
     // 接收线程：融合逻辑
     void ReceiveLoop() ;
 
 private:
     // 辅助工具
     void sendRawFrame(uint8_t chan, uint32_t type, uint16_t data_area, uint8_t motor_id, uint8_t* data);
+    void sendType5Write(uint8_t chan, uint16_t canid, uint8_t addr, int32_t value, bool fast_write);
+    void sendType5Read(uint8_t chan, uint16_t canid, uint8_t addr);
+    int setType5PIRegs(int& motor_index, uint8_t p_addr, uint32_t kp, uint8_t i_addr, uint32_t ki, bool save);
 
     // --- Type 1 (灵足/LimX) 原始逻辑封装 ---
     void EnableMotor_Type1(int& motor_index);
@@ -58,4 +65,38 @@ private:
     void SetMode_Type2(int& motor_index, int mode);
     void SendCommand_Type2(int& motor_index);
     void QueryPos_Type2(int& motor_index);
+
+    // --- Type 3 (达妙/DM) 私有逻辑封装 ---
+    void EnableMotor_Type3(int& motor_index);
+    void DisableMotor_Type3(int& motor_index);
+    void ClearError_Type3(int& motor_index);
+    //  * mode: 0-MIT, 1-位置速度(PV), 2-速度, 3-力矩(映射到MIT发送)
+    void SetMode_Type3(int& motor_index, int mode);
+    void SendCommand_Type3(int& motor_index);
+    void QueryPos_Type3(int& motor_index);
+
+    // --- Type 4 (RoboMaster C620) 私有逻辑封装 ---
+    void EnableMotor_Type4(int& motor_index);
+    void DisableMotor_Type4(int& motor_index);
+    void ClearError_Type4(int& motor_index);
+    //  * mode: 保留字段，C620 仅支持 CAN 电流环指令
+    void SetMode_Type4(int& motor_index, int mode);
+    void SendCommand_Type4(int& motor_index);
+    void QueryPos_Type4(int& motor_index);
+
+    // --- Type 5 (意优 PP11 / 行星 V3) 私有逻辑封装 ---
+    void EnableMotor_Type5(int& motor_index);
+    void DisableMotor_Type5(int& motor_index);
+    void ClearError_Type5(int& motor_index);
+    void SetMode_Type5(int& motor_index, int mode);
+    void SendCommand_Type5(int& motor_index);
+    void QueryPos_Type5(int& motor_index);
+
+    // --- Type 6 (ENCOS) 私有逻辑封装 ---
+    void EnableMotor_Type6(int& motor_index);
+    void DisableMotor_Type6(int& motor_index);
+    void ClearError_Type6(int& motor_index);
+    void SetMode_Type6(int& motor_index, int mode);
+    void SendCommand_Type6(int& motor_index);
+    void QueryPos_Type6(int& motor_index);
 };
