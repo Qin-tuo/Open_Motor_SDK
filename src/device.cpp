@@ -1,5 +1,6 @@
 #include "device.hpp"
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 
 #include <linux/can.h>
@@ -37,10 +38,129 @@ static const float LK_POS_SEND_FACTOR = 57.29578f * 100.0f;
 
 static const float C620_POS_TO_RAD = 6.28318530718f / 8191.0f;
 static const float C620_RPM_TO_RAD_S = 6.28318530718f / 60.0f;
+static const float TWO_PI = 6.28318530718f;
+static const uint8_t HQ_MASTER_ID = 0;
+static const bool HQ_REPLY_REQUIRED = true;
+static const float HQ_POS_SCALE = 10000.0f;
+static const float HQ_VEL_SCALE = 4000.0f; // int16 velocity lsb=0.00025 turns/s
+static const float HQ_TORQUE_SCALE = 100.0f;
+static const float HQ_KP_KD_SCALE = 10.0f; // int16 kp/kd lsb=0.1
+static const float HQ_POS_SCALE_I32 = 100000.0f;
+static const float HQ_VEL_SCALE_I32 = 100000.0f;
+static const float HQ_TORQUE_SCALE_I32 = 1000.0f;
 
-static bool tryBringUpInterface(const std::string& iface, int bitrate = 1000000) {
+static inline int16_t clamp_to_i16_no_sentinel(float val) {
+    // 0x8000 is reserved by HighTorque protocol as "unlimited".
+    if (val > 32767.0f) val = 32767.0f;
+    if (val < -32767.0f) val = -32767.0f;
+    return static_cast<int16_t>(std::lround(val));
+}
+
+static inline void write_le_i16(uint8_t* dst, int16_t value) {
+    const uint16_t raw = static_cast<uint16_t>(value);
+    dst[0] = static_cast<uint8_t>(raw & 0xFF);
+    dst[1] = static_cast<uint8_t>((raw >> 8) & 0xFF);
+}
+
+static inline void write_le_u16(uint8_t* dst, uint16_t value) {
+    dst[0] = static_cast<uint8_t>(value & 0xFF);
+    dst[1] = static_cast<uint8_t>((value >> 8) & 0xFF);
+}
+
+static inline int16_t read_le_i16(const uint8_t* src) {
+    const uint16_t raw = static_cast<uint16_t>(src[0]) |
+                         (static_cast<uint16_t>(src[1]) << 8);
+    return static_cast<int16_t>(raw);
+}
+
+static inline int32_t read_le_i32(const uint8_t* src) {
+    const uint32_t raw = static_cast<uint32_t>(src[0]) |
+                         (static_cast<uint32_t>(src[1]) << 8) |
+                         (static_cast<uint32_t>(src[2]) << 16) |
+                         (static_cast<uint32_t>(src[3]) << 24);
+    return static_cast<int32_t>(raw);
+}
+
+static inline float read_le_f32(const uint8_t* src) {
+    float value = 0.0f;
+    std::memcpy(&value, src, sizeof(value));
+    return value;
+}
+
+static inline uint32_t build_hq_can_id(uint8_t motor_id, bool require_reply) {
+    uint8_t src = static_cast<uint8_t>(HQ_MASTER_ID & 0x7F);
+    if (require_reply) src |= 0x80;
+    const uint8_t dst = static_cast<uint8_t>(motor_id & 0x7F);
+    return (static_cast<uint32_t>(src) << 8) | dst;
+}
+
+static bool use_canfd_brs() {
+    const char* env = std::getenv("HQ_CANFD_BRS");
+    if (!env) return false;
+    return std::string(env) == "1";
+}
+
+struct HQTypeAdapt {
+    float tq_k;
+    float tq_d;
+};
+
+static std::string normalize_hq_type(std::string type) {
+    std::string out;
+    out.reserve(type.size());
+    for (char ch : type) {
+        if (ch == '-' || ch == ' ') {
+            out.push_back('_');
+            continue;
+        }
+        out.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(ch))));
+    }
+    return out;
+}
+
+static HQTypeAdapt get_hq_type_adapt(const std::string& type_name) {
+    const std::string key = normalize_hq_type(type_name);
+    if (key == "M3536_32") return {0.458100f, 0.0f};
+    if (key == "M4438_30") return {0.525600f, 0.0f};
+    if (key == "M4438_32") return {0.558400f, 0.0f};
+    if (key == "M4538_19") return {0.445000f, 0.0f};
+    if (key == "M5043_20") return {0.966000f, 0.0f};
+    if (key == "M5046_20") return {0.528000f, 0.0f};
+    if (key == "M5047_09") return {0.533000f, 0.0f};
+    if (key == "M5047_36") return {0.803000f, 0.0f};
+    if (key == "M6056_36") return {0.677000f, 0.0f};
+    if (key == "M7256_35") return {0.677000f, 0.0f};
+    if (key == "M60SG_35") return {0.794200f, 0.0f};
+    if (key == "M60BM_35") return {0.794200f, 0.0f};
+    if (key == "MGENERAL") return {0.500000f, 0.0f};
+    if (key == "MNONE" || key == "HQ" || key.empty()) return {1.000000f, 0.0f};
+    return {1.000000f, 0.0f};
+}
+
+static float hq_adjust_torque_by_type(float tq_nm, const HQTypeAdapt& adapt) {
+    if (std::fabs(adapt.tq_k) < 1e-6f) return tq_nm;
+    return (tq_nm - adapt.tq_d) / adapt.tq_k;
+}
+
+static float hq_restore_torque_by_type(float tq_driver, const HQTypeAdapt& adapt) {
+    return tq_driver * adapt.tq_k + adapt.tq_d;
+}
+
+static float hq_adjust_pid_by_type(float pid, const HQTypeAdapt& adapt) {
+    if (std::fabs(adapt.tq_k) < 1e-6f) return pid;
+    return pid / adapt.tq_k;
+}
+
+static bool tryBringUpInterface(const std::string& iface,
+                                int bitrate = 1000000,
+                                bool enable_canfd = false,
+                                int dbitrate = 1000000) {
     std::string cmd = "ip link set " + iface + " down 2>/dev/null && ";
-    cmd += "ip link set " + iface + " type can bitrate " + std::to_string(bitrate) + " 2>/dev/null && ";
+    cmd += "ip link set " + iface + " type can bitrate " + std::to_string(bitrate);
+    if (enable_canfd) {
+        cmd += " dbitrate " + std::to_string(dbitrate) + " fd on";
+    }
+    cmd += " 2>/dev/null && ";
     cmd += "ip link set " + iface + " up 2>/dev/null";
     int r = std::system(cmd.c_str());
     return (r == 0);
@@ -86,7 +206,7 @@ DeviceX::~DeviceX() {
     }
 }
 
-bool DeviceX::openSocket(const std::string& iface) {
+bool DeviceX::openSocket(const std::string& iface, bool enable_canfd) {
     socket_fd = socket(PF_CAN, SOCK_RAW, CAN_RAW);
     if (socket_fd < 0) {
         std::perror("socket");
@@ -127,7 +247,7 @@ bool DeviceX::openSocket(const std::string& iface) {
         std::cerr << "[Info] Attempting to bring up " << iface << " (process has CAP_NET_ADMIN)..." << std::endl;
         bool ok = false;
         for (int attempt = 0; attempt < 3; ++attempt) {
-            if (tryBringUpInterface(iface)) {
+            if (tryBringUpInterface(iface, 1000000, enable_canfd, 1000000)) {
                 if (ioctl(socket_fd, SIOCGIFFLAGS, &ifr2) == 0 && (ifr2.ifr_flags & IFF_UP)) {
                     ok = true;
                     break;
@@ -170,6 +290,11 @@ bool DeviceX::openSocket(const std::string& iface) {
         std::perror("setsockopt SO_SNDTIMEO");
     }
 
+    int sndbuf_bytes = 512 * 1024;
+    if (setsockopt(socket_fd, SOL_SOCKET, SO_SNDBUF, &sndbuf_bytes, sizeof(sndbuf_bytes)) < 0) {
+        std::perror("setsockopt SO_SNDBUF");
+    }
+
     int enable_fd = 1;
     if (setsockopt(socket_fd, SOL_CAN_RAW, CAN_RAW_FD_FRAMES, &enable_fd, sizeof(enable_fd)) < 0) {
         std::perror("setsockopt CAN_RAW_FD_FRAMES");
@@ -185,7 +310,17 @@ bool DeviceX::Init(const std::string& iface, int dev_idx,
     p_motors_data = data_ptr;
     p_mapper = mapper_ptr;
 
-    if (!openSocket(iface_name)) {
+    bool need_canfd = false;
+    if (p_motors_data) {
+        for (const auto& motor : *p_motors_data) {
+            if (motor.info.device_index == dev_idx && motor.info.api_type == 5) {
+                need_canfd = true;
+                break;
+            }
+        }
+    }
+
+    if (!openSocket(iface_name, need_canfd)) {
         std::cerr << "[Error] Failed to open socketcan interface: " << iface_name << std::endl;
         return false;
     }
@@ -196,6 +331,68 @@ bool DeviceX::Init(const std::string& iface, int dev_idx,
     return true;
 }
 
+bool DeviceX::sendFrameWithRetry(const void* frame, std::size_t frame_size, const char* tag) {
+    if (socket_fd < 0 || frame == nullptr || frame_size == 0) {
+        return false;
+    }
+
+    constexpr int kMaxRetries = 3;
+    for (int attempt = 0; attempt <= kMaxRetries; ++attempt) {
+        const int n = send(socket_fd, frame, frame_size, MSG_DONTWAIT);
+        if (n == static_cast<int>(frame_size)) {
+            return true;
+        }
+
+        if (n >= 0) {
+            std::cerr << tag << ": short send (" << n << "/" << frame_size << ")" << std::endl;
+            return false;
+        }
+
+        const int err = errno;
+        if (err == EAGAIN || err == EWOULDBLOCK || err == ETIMEDOUT || err == EINTR) {
+            if (attempt < kMaxRetries) {
+                std::this_thread::sleep_for(std::chrono::microseconds(200));
+                continue;
+            }
+            return false;
+        }
+
+        if (err == ENOBUFS) {
+            enobufs_drop_count.fetch_add(1, std::memory_order_relaxed);
+            if (attempt < kMaxRetries) {
+                std::this_thread::sleep_for(std::chrono::microseconds(400 * (attempt + 1)));
+                continue;
+            }
+
+            const auto now_ms = static_cast<unsigned long long>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count());
+            auto expected_last_ms = last_enobufs_log_ms.load(std::memory_order_relaxed);
+            if (now_ms - expected_last_ms >= 1000ULL &&
+                last_enobufs_log_ms.compare_exchange_strong(
+                    expected_last_ms, now_ms, std::memory_order_relaxed)) {
+                std::cerr << tag << ": No buffer space available on " << iface_name
+                          << " (dropped=" << enobufs_drop_count.load(std::memory_order_relaxed) << "). "
+                          << "Try lowering query/send rate or increasing can tx queue length." << std::endl;
+            }
+            return false;
+        }
+
+        if (err == ENETDOWN) {
+            std::cerr << tag << ": Network is down on " << iface_name
+                      << ". Closing socket until interface is up." << std::endl;
+            close(socket_fd);
+            socket_fd = -1;
+            return false;
+        }
+
+        std::perror(tag);
+        return false;
+    }
+
+    return false;
+}
+
 void DeviceX::sendExtendedFrame(uint32_t type, uint16_t data_area, uint8_t motor_id, const uint8_t* data) {
     if (socket_fd < 0) return;
 
@@ -204,20 +401,28 @@ void DeviceX::sendExtendedFrame(uint32_t type, uint16_t data_area, uint8_t motor
     frame.can_id |= CAN_EFF_FLAG;
     frame.can_dlc = 8;
     std::memcpy(frame.data, data, 8);
+    sendFrameWithRetry(&frame, sizeof(frame), "sendExtendedFrame");
+}
 
-    int n = send(socket_fd, &frame, sizeof(frame), MSG_DONTWAIT);
-    if (n != static_cast<int>(sizeof(frame))) {
-        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == ETIMEDOUT || errno == EINTR)) {
-            return;
-        }
-        if (errno == ENETDOWN) {
-            std::cerr << "sendExtendedFrame: Network is down on " << iface_name << ". Closing socket until interface is up." << std::endl;
-            close(socket_fd);
-            socket_fd = -1;
-        } else {
-            std::perror("sendExtendedFrame");
-        }
-    }
+void DeviceX::sendExtendedIdFrame(uint32_t can_id, const uint8_t* data, uint8_t dlc) {
+    if (socket_fd < 0 || dlc > 8) return;
+
+    struct can_frame frame {};
+    frame.can_id = (can_id & CAN_EFF_MASK) | CAN_EFF_FLAG;
+    frame.can_dlc = dlc;
+    std::memcpy(frame.data, data, dlc);
+    sendFrameWithRetry(&frame, sizeof(frame), "sendExtendedIdFrame");
+}
+
+void DeviceX::sendExtendedIdFdFrame(uint32_t can_id, const uint8_t* data, uint8_t len) {
+    if (socket_fd < 0 || len > 64) return;
+
+    struct canfd_frame frame {};
+    frame.can_id = (can_id & CAN_EFF_MASK) | CAN_EFF_FLAG;
+    frame.len = len;
+    frame.flags = use_canfd_brs() ? CANFD_BRS : 0;
+    std::memcpy(frame.data, data, len);
+    sendFrameWithRetry(&frame, sizeof(frame), "sendExtendedIdFdFrame");
 }
 
 void DeviceX::sendStandardFrame(uint32_t can_id, const uint8_t* data, uint8_t dlc) {
@@ -227,20 +432,7 @@ void DeviceX::sendStandardFrame(uint32_t can_id, const uint8_t* data, uint8_t dl
     frame.can_id = (can_id & CAN_SFF_MASK);
     frame.can_dlc = dlc;
     std::memcpy(frame.data, data, dlc);
-
-    int n = send(socket_fd, &frame, sizeof(frame), MSG_DONTWAIT);
-    if (n != static_cast<int>(sizeof(frame))) {
-        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == ETIMEDOUT || errno == EINTR)) {
-            return;
-        }
-        if (errno == ENETDOWN) {
-            std::cerr << "sendStandardFrame: Network is down on " << iface_name << ". Closing socket until interface is up." << std::endl;
-            close(socket_fd);
-            socket_fd = -1;
-        } else {
-            std::perror("sendStandardFrame");
-        }
-    }
+    sendFrameWithRetry(&frame, sizeof(frame), "sendStandardFrame");
 }
 
 void DeviceX::sendRawFrame(uint8_t chan, uint32_t type, uint16_t data_area, uint8_t motor_id, uint8_t* data) {
@@ -261,6 +453,7 @@ void DeviceX::EnableMotor(int& motor_index) {
     else if (type == 2) EnableMotor_Type2(motor_index);
     else if (type == 3) EnableMotor_Type3(motor_index);
     else if (type == 4) EnableMotor_Type4(motor_index);
+    else if (type == 5) EnableMotor_Type5(motor_index);
 }
 
 void DeviceX::DisableMotor(int& motor_index) {
@@ -272,6 +465,7 @@ void DeviceX::DisableMotor(int& motor_index) {
     else if (type == 2) DisableMotor_Type2(motor_index);
     else if (type == 3) DisableMotor_Type3(motor_index);
     else if (type == 4) DisableMotor_Type4(motor_index);
+    else if (type == 5) DisableMotor_Type5(motor_index);
 }
 
 void DeviceX::ClearError(int& motor_index) {
@@ -283,6 +477,7 @@ void DeviceX::ClearError(int& motor_index) {
     else if (type == 2) ClearError_Type2(motor_index);
     else if (type == 3) ClearError_Type3(motor_index);
     else if (type == 4) ClearError_Type4(motor_index);
+    else if (type == 5) ClearError_Type5(motor_index);
 }
 
 void DeviceX::SetZero(int& motor_index) {
@@ -294,6 +489,7 @@ void DeviceX::SetZero(int& motor_index) {
     else if (type == 2) SetZero_Type2(motor_index);
     else if (type == 3) SetZero_Type3(motor_index);
     else if (type == 4) SetZero_Type4(motor_index);
+    else if (type == 5) SetZero_Type5(motor_index);
 }
 
 void DeviceX::SetMode(int& motor_index, int mode) {
@@ -305,6 +501,7 @@ void DeviceX::SetMode(int& motor_index, int mode) {
     else if (type == 2) SetMode_Type2(motor_index, mode);
     else if (type == 3) SetMode_Type3(motor_index, mode);
     else if (type == 4) SetMode_Type4(motor_index, mode);
+    else if (type == 5) SetMode_Type5(motor_index, mode);
 }
 
 void DeviceX::SendCommand(int& motor_index) {
@@ -319,6 +516,7 @@ void DeviceX::SendCommand(int& motor_index) {
     else if (type == 2) SendCommand_Type2(motor_index);
     else if (type == 3) SendCommand_Type3(motor_index);
     else if (type == 4) SendCommand_Type4(motor_index);
+    else if (type == 5) SendCommand_Type5(motor_index);
 }
 
 void DeviceX::QueryPos(int& motor_index) {
@@ -330,6 +528,7 @@ void DeviceX::QueryPos(int& motor_index) {
     else if (type == 2) QueryPos_Type2(motor_index);
     else if (type == 3) QueryPos_Type3(motor_index);
     else if (type == 4) QueryPos_Type4(motor_index);
+    else if (type == 5) QueryPos_Type5(motor_index);
 }
 
 // =========================================================
@@ -695,37 +894,209 @@ void DeviceX::QueryPos_Type4(int& motor_index) {
 }
 
 // =========================================================
+//  Type 5 (HighTorque/高擎)
+// =========================================================
+
+void DeviceX::EnableMotor_Type5(int& motor_index) {
+    // HighTorque protocol does not expose a dedicated "enable" command in the
+    // provided CAN document. We perform a state query to confirm communication.
+    QueryPos_Type5(motor_index);
+}
+
+void DeviceX::DisableMotor_Type5(int& motor_index) {
+    const auto& info = (*p_motors_data)[motor_index].info;
+    const uint32_t can_id = build_hq_can_id(static_cast<uint8_t>(info.canid), HQ_REPLY_REQUIRED);
+    // ref/livelybot_fdcan.c: set_motor_stop_int16()
+    const uint8_t tdata[] = {0x01, 0x00, 0x00, 0x14, 0x04, 0x00, 0x11, 0x0F};
+    sendExtendedIdFrame(can_id, tdata, sizeof(tdata));
+}
+
+void DeviceX::ClearError_Type5(int& motor_index) {
+    const auto& info = (*p_motors_data)[motor_index].info;
+    const uint32_t can_id = build_hq_can_id(static_cast<uint8_t>(info.canid), HQ_REPLY_REQUIRED);
+    // ref/livelybot_fdcan.c: set_motor_reset_int8()
+    const uint8_t reset_cmd[] = {
+        0x40, 0x01, 0x08, 0x64, 0x20, 0x72, 0x65, 0x73, 0x65, 0x74, 0x0A, 0x50
+    };
+    sendExtendedIdFdFrame(can_id, reset_cmd, sizeof(reset_cmd));
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+    QueryPos_Type5(motor_index);
+}
+
+void DeviceX::SetZero_Type5(int& motor_index) {
+    const auto& info = (*p_motors_data)[motor_index].info;
+    const uint32_t can_id = build_hq_can_id(static_cast<uint8_t>(info.canid), HQ_REPLY_REQUIRED);
+
+    // ref/livelybot_fdcan.c: set_pos_rezero()
+    const uint8_t rezero_cmd[] = {
+        0x40, 0x01, 0x15, 0x64, 0x20, 0x63, 0x66, 0x67,
+        0x2D, 0x73, 0x65, 0x74, 0x2D, 0x6F, 0x75, 0x74,
+        0x70, 0x75, 0x74, 0x20, 0x30, 0x2E, 0x30, 0x0A
+    };
+    sendExtendedIdFdFrame(can_id, rezero_cmd, sizeof(rezero_cmd));
+
+    // ref/livelybot_fdcan.c: set_conf_write()
+    const uint8_t conf_write_cmd[] = {
+        0x40, 0x01, 0x0B, 0x63, 0x6F, 0x6E, 0x66, 0x20,
+        0x77, 0x72, 0x69, 0x74, 0x65, 0x0A, 0x50, 0x50
+    };
+    sendExtendedIdFdFrame(can_id, conf_write_cmd, sizeof(conf_write_cmd));
+}
+
+void DeviceX::SetMode_Type5(int& motor_index, int mode) {
+    if (mode < 0) mode = 0;
+    if (mode > 3) mode = 3;
+    (*p_motors_data)[motor_index].send.mode = static_cast<uint8_t>(mode);
+}
+
+void DeviceX::SendCommand_Type5(int& motor_index) {
+    const Motor_CAN_Struct& motor = (*p_motors_data)[motor_index];
+    const auto& info = motor.info;
+    const auto& cmd = motor.send;
+    const HQTypeAdapt adapt = get_hq_type_adapt(info.type);
+
+    const float pos_scale = HQ_POS_SCALE;
+    const float vel_scale = HQ_VEL_SCALE;
+    const float tq_scale = HQ_TORQUE_SCALE;
+
+    auto clamp_phys_torque = [&](float tq_nm) {
+        if (info.t_max > info.t_min) {
+            return std::max(info.t_min, std::min(info.t_max, tq_nm));
+        }
+        return tq_nm;
+    };
+
+    auto encode_torque_raw = [&](float tq_nm) {
+        const float tq_adj = hq_adjust_torque_by_type(clamp_phys_torque(tq_nm), adapt);
+        return clamp_to_i16_no_sentinel(tq_adj * tq_scale);
+    };
+
+    const float pos_turn = cmd.position / TWO_PI;
+    const float vel_turn_s = cmd.speed / TWO_PI;
+    const int16_t pos_raw = clamp_to_i16_no_sentinel(pos_turn * pos_scale);
+    const int16_t vel_raw = clamp_to_i16_no_sentinel(vel_turn_s * vel_scale);
+    const int16_t tq_ff_raw = encode_torque_raw(cmd.torque);
+
+    const uint32_t can_id = build_hq_can_id(static_cast<uint8_t>(info.canid), HQ_REPLY_REQUIRED);
+    const uint16_t unlimited = 0x8000;
+
+    uint8_t tdata[8] = {0};
+    switch (cmd.mode) {
+        case 1: { // position + torque, velocity unlimited
+            tdata[0] = 0x07;
+            tdata[1] = 0x07;
+            write_le_i16(&tdata[2], pos_raw);
+            write_le_u16(&tdata[4], unlimited);
+            write_le_i16(&tdata[6], tq_ff_raw);
+            sendExtendedIdFrame(can_id, tdata, 8);
+            break;
+        }
+        case 2: { // velocity + torque, position unlimited
+            tdata[0] = 0x07;
+            tdata[1] = 0x07;
+            write_le_u16(&tdata[2], unlimited);
+            write_le_i16(&tdata[4], vel_raw);
+            write_le_i16(&tdata[6], tq_ff_raw);
+            sendExtendedIdFrame(can_id, tdata, 8);
+            break;
+        }
+        case 3: { // torque only
+            const int16_t tq_raw = encode_torque_raw(cmd.torque);
+            tdata[0] = 0x05;
+            tdata[1] = 0x13;
+            write_le_i16(&tdata[2], tq_raw);
+            sendExtendedIdFrame(can_id, tdata, 4);
+            break;
+        }
+        case 0:
+        default: { // MIT mode 2 (int16): mode set + pos/vel/tqe + kp/kd + state query
+            const int16_t tq_raw = encode_torque_raw(cmd.torque);
+            const float kp_adj = hq_adjust_pid_by_type(cmd.kp, adapt);
+            const float kd_adj = hq_adjust_pid_by_type(cmd.kd, adapt);
+            const int16_t kp_raw = clamp_to_i16_no_sentinel(kp_adj * HQ_KP_KD_SCALE);
+            const int16_t kd_raw = clamp_to_i16_no_sentinel(kd_adj * HQ_KP_KD_SCALE);
+
+            // Reference sequence (ref/livelybot_fdcan.c set_pos_vel_tqe_kp_kd_int16_2):
+            // 1) 0x01,0x00,0x15: set mode register to MIT2
+            // 2) 0x07,0x20: write pos/vel/tqe int16
+            // 3) 0x06,0x2B: write kp/kd int16
+            // 4) 0x14,0x04,0x00,0x11,0x0F: query state int16 (mode/fault/pos/vel/tqe)
+            uint8_t fd_data[24] = {0};
+            fd_data[0] = 0x01;
+            fd_data[1] = 0x00;
+            fd_data[2] = 0x15;
+
+            fd_data[3] = 0x07;
+            fd_data[4] = 0x20;
+            write_le_i16(&fd_data[5], pos_raw);
+            write_le_i16(&fd_data[7], vel_raw);
+            write_le_i16(&fd_data[9], tq_raw);
+
+            fd_data[11] = 0x06;
+            fd_data[12] = 0x2B;
+            write_le_i16(&fd_data[13], kp_raw);
+            write_le_i16(&fd_data[15], kd_raw);
+
+            fd_data[17] = 0x14;
+            fd_data[18] = 0x04;
+            fd_data[19] = 0x00;
+            fd_data[20] = 0x11;
+            fd_data[21] = 0x0F;
+
+            fd_data[22] = 0x50;
+            fd_data[23] = 0x50;
+            sendExtendedIdFdFrame(can_id, fd_data, sizeof(fd_data));
+            break;
+        }
+    }
+}
+
+void DeviceX::QueryPos_Type5(int& motor_index) {
+    const auto& info = (*p_motors_data)[motor_index].info;
+    const uint32_t can_id = build_hq_can_id(static_cast<uint8_t>(info.canid), HQ_REPLY_REQUIRED);
+    // ref/livelybot_fdcan.c: read_motor_state_int16()
+    const uint8_t tdata[] = {0x14, 0x04, 0x00, 0x11, 0x0F};
+    sendExtendedIdFrame(can_id, tdata, sizeof(tdata));
+}
+
+// =========================================================
 //  Receive Loop
 // =========================================================
 
 void DeviceX::ReceiveLoop() {
     while (is_running) {
-        struct can_frame frame {};
+        struct canfd_frame frame {};
         int n = read(socket_fd, &frame, sizeof(frame));
         if (n < 0) {
             if (errno == EINTR) continue;
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
             continue;
         }
-        if (n != static_cast<int>(sizeof(frame))) {
+        if (n != CAN_MTU && n != CANFD_MTU) {
             continue;
         }
 
+        const uint8_t frame_len = frame.len;
+        if (frame_len == 0 || frame_len > CANFD_MAX_DLEN) continue;
+
         int parsed_motor_id = -1;
         uint8_t rx_channel = 0;
+        const bool is_eff = (frame.can_id & CAN_EFF_FLAG) != 0;
+        const uint32_t canID = frame.can_id & (is_eff ? CAN_EFF_MASK : CAN_SFF_MASK);
 
-        if (frame.can_id & CAN_EFF_FLAG) {
-            uint32_t canID = frame.can_id & CAN_EFF_MASK;
+        if (is_eff) {
             parsed_motor_id = (canID >> 8) & 0xFF;
         } else {
-            uint32_t canID = frame.can_id & CAN_SFF_MASK;
             if (canID >= 0x140 && canID < 0x160) {
                 parsed_motor_id = canID - 0x140;
             } else if (canID >= 0x180 && canID < 0x1A0) {
                 parsed_motor_id = canID - 0x180;
             } else if (canID >= 0x201 && canID <= 0x208) {
                 parsed_motor_id = canID - 0x200;
-            } else {
+            } else if ((((canID >> 8) & 0x7F) > 0) && ((canID & 0x7F) == 0 || (canID & 0x7F) == 0x7F)) {
+                // HighTorque reply id format: [src(7bit)][dst(7bit)].
+                parsed_motor_id = static_cast<int>((canID >> 8) & 0x7F);
+            } else if (frame_len > 0) {
                 parsed_motor_id = frame.data[0] & 0x0F;
             }
         }
@@ -738,11 +1109,10 @@ void DeviceX::ReceiveLoop() {
 
         Motor_CAN_Struct& motor = (*p_motors_data)[g_idx];
 
-        if (motor.info.api_type == 1 && (frame.can_id & CAN_EFF_FLAG)) {
-            uint32_t canID = frame.can_id & CAN_EFF_MASK;
+        if (motor.info.api_type == 1 && is_eff) {
             uint8_t type_field = (canID >> 24) & 0x1F;
 
-            if (type_field == 2) {
+            if (type_field == 2 && frame_len >= 8) {
                 uint16_t p_int = (frame.data[0] << 8) | frame.data[1];
                 uint16_t v_int = (frame.data[2] << 8) | frame.data[3];
                 uint16_t t_int = (frame.data[4] << 8) | frame.data[5];
@@ -755,20 +1125,20 @@ void DeviceX::ReceiveLoop() {
 
                 motor.recv.fault_message = (canID >> 16) & 0x3F;
                 motor.recv.mode = (canID >> 22) & 0x03;
-            } else if (type_field == 17) {
+            } else if (type_field == 17 && frame_len >= 8) {
                 if (frame.data[0] == 0x19 && frame.data[1] == 0x70) {
                     float temp_val = 0.0f;
                     std::memcpy(&temp_val, &frame.data[4], 4);
                     motor.recv.current_position_f.store(temp_val);
                 }
-            } else if (type_field == 21) {
+            } else if (type_field == 21 && frame_len >= 4) {
                 uint32_t fault_word = 0;
                 std::memcpy(&fault_word, &frame.data[0], 4);
                 motor.recv.fault_message = static_cast<uint8_t>(fault_word);
             }
         } else if (motor.info.api_type == 2 && !(frame.can_id & CAN_EFF_FLAG)) {
             uint8_t status = frame.data[0];
-            if (status == 0x9C || status == 0xA1 || status == 0xA2 || status == 0xA3) {
+            if (frame_len >= 8 && (status == 0x9C || status == 0xA1 || status == 0xA2 || status == 0xA3)) {
                 int8_t temp = static_cast<int8_t>(frame.data[1]);
                 int16_t iq_raw = static_cast<int16_t>((frame.data[3] << 8) | frame.data[2]);
                 int16_t spd_raw = static_cast<int16_t>((frame.data[5] << 8) | frame.data[4]);
@@ -783,7 +1153,7 @@ void DeviceX::ReceiveLoop() {
                 motor.recv.mode = status;
                 motor.recv.fault_message = 0;
             }
-        } else if (motor.info.api_type == 3) {
+        } else if (motor.info.api_type == 3 && frame_len >= 8) {
             uint8_t id_and_err = frame.data[0];
             uint8_t err = (id_and_err >> 4) & 0x0F;
             uint8_t motor_id = id_and_err & 0x0F;
@@ -799,7 +1169,7 @@ void DeviceX::ReceiveLoop() {
 
             motor.recv.motor_id = motor_id;
             motor.recv.fault_message = err;
-        } else if (motor.info.api_type == 4) {
+        } else if (motor.info.api_type == 4 && frame_len >= 7) {
             uint16_t pos_raw = (uint16_t)((frame.data[0] << 8) | frame.data[1]);
             int16_t spd_rpm = (int16_t)((frame.data[2] << 8) | frame.data[3]);
             int16_t iq_raw = (int16_t)((frame.data[4] << 8) | frame.data[5]);
@@ -820,6 +1190,81 @@ void DeviceX::ReceiveLoop() {
             motor.recv.current_temp_f.store((float)temp);
             motor.recv.motor_id = (uint8_t)parsed_motor_id;
             motor.recv.fault_message = 0;
+        } else if (motor.info.api_type == 5) {
+            if (frame_len < 2) continue;
+            const HQTypeAdapt adapt = get_hq_type_adapt(motor.info.type);
+
+            const uint8_t cmd = frame.data[0];
+            if (cmd == 0x24 && frame_len >= 14 &&
+                frame.data[1] == 0x04 && frame.data[2] == 0x00 &&
+                frame.data[11] == 0x21 && frame.data[12] == 0x0F) {
+                const int16_t pos_raw = read_le_i16(&frame.data[5]);
+                const int16_t vel_raw = read_le_i16(&frame.data[7]);
+                const int16_t tq_raw = read_le_i16(&frame.data[9]);
+
+                const float pos_turn = static_cast<float>(pos_raw) / HQ_POS_SCALE;
+                const float vel_turn_s = static_cast<float>(vel_raw) / HQ_VEL_SCALE;
+                const float tq_driver = static_cast<float>(tq_raw) / HQ_TORQUE_SCALE;
+                const float tq_nm = hq_restore_torque_by_type(tq_driver, adapt);
+
+                motor.recv.current_position_f.store(pos_turn * TWO_PI);
+                motor.recv.current_speed_f.store(vel_turn_s * TWO_PI);
+                motor.recv.current_iq_f.store(tq_driver);
+                motor.recv.current_torque_f.store(tq_nm);
+                motor.recv.motor_id = static_cast<uint8_t>(parsed_motor_id);
+                motor.recv.mode = frame.data[3];
+                motor.recv.fault_message = frame.data[13];
+            } else if (cmd == 0x28 && frame_len >= 22 &&
+                       frame.data[1] == 0x04 && frame.data[2] == 0x00 &&
+                       frame.data[19] == 0x21 && frame.data[20] == 0x0F) {
+                const int32_t pos_raw = read_le_i32(&frame.data[7]);
+                const int32_t vel_raw = read_le_i32(&frame.data[11]);
+                const int32_t tq_raw = read_le_i32(&frame.data[15]);
+
+                const float pos_turn = static_cast<float>(pos_raw) / HQ_POS_SCALE_I32;
+                const float vel_turn_s = static_cast<float>(vel_raw) / HQ_VEL_SCALE_I32;
+                const float tq_driver = static_cast<float>(tq_raw) / HQ_TORQUE_SCALE_I32;
+                const float tq_nm = hq_restore_torque_by_type(tq_driver, adapt);
+
+                motor.recv.current_position_f.store(pos_turn * TWO_PI);
+                motor.recv.current_speed_f.store(vel_turn_s * TWO_PI);
+                motor.recv.current_iq_f.store(tq_driver);
+                motor.recv.current_torque_f.store(tq_nm);
+                motor.recv.motor_id = static_cast<uint8_t>(parsed_motor_id);
+                motor.recv.mode = frame.data[3];
+                motor.recv.fault_message = frame.data[21];
+            } else if (cmd == 0x2C && frame_len >= 22 &&
+                       frame.data[1] == 0x04 && frame.data[2] == 0x00 &&
+                       frame.data[19] == 0x21 && frame.data[20] == 0x0F) {
+                const float pos_turn = read_le_f32(&frame.data[7]);
+                const float vel_turn_s = read_le_f32(&frame.data[11]);
+                const float tq_driver = read_le_f32(&frame.data[15]);
+                const float tq_nm = hq_restore_torque_by_type(tq_driver, adapt);
+
+                motor.recv.current_position_f.store(pos_turn * TWO_PI);
+                motor.recv.current_speed_f.store(vel_turn_s * TWO_PI);
+                motor.recv.current_iq_f.store(tq_driver);
+                motor.recv.current_torque_f.store(tq_nm);
+                motor.recv.motor_id = static_cast<uint8_t>(parsed_motor_id);
+                motor.recv.mode = frame.data[3];
+                motor.recv.fault_message = frame.data[21];
+            } else if (cmd == 0x27 && frame.data[1] == 0x01 && frame_len >= 8) {
+                const int16_t pos_raw = read_le_i16(&frame.data[2]);
+                const int16_t vel_raw = read_le_i16(&frame.data[4]);
+                const int16_t tq_raw = read_le_i16(&frame.data[6]);
+                const float pos_turn = static_cast<float>(pos_raw) / HQ_POS_SCALE;
+                const float vel_turn_s = static_cast<float>(vel_raw) / HQ_VEL_SCALE;
+                const float tq_driver = static_cast<float>(tq_raw) / HQ_TORQUE_SCALE;
+                const float tq_nm = hq_restore_torque_by_type(tq_driver, adapt);
+
+                motor.recv.current_position_f.store(pos_turn * TWO_PI);
+                motor.recv.current_speed_f.store(vel_turn_s * TWO_PI);
+                motor.recv.current_iq_f.store(tq_driver);
+                motor.recv.current_torque_f.store(tq_nm);
+                motor.recv.motor_id = static_cast<uint8_t>(parsed_motor_id);
+                motor.recv.mode = motor.send.mode;
+                motor.recv.fault_message = 0;
+            }
         }
     }
 }

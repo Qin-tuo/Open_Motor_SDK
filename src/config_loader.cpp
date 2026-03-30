@@ -93,23 +93,48 @@ std::vector<Motor_CAN_Info_Struct> MotorConfigLoader::loadConfig(const std::stri
         m.device_name = "can" + std::to_string(m.chan);
         get_val(m.canid, "canid");
 
-        // 2. Physics Params
-        get_val(m.p_min, "p_min");
-        get_val(m.p_max, "p_max");
-        get_val(m.v_min, "v_min");
-        get_val(m.v_max, "v_max");
-        get_val(m.kp_min, "kp_min");
-        get_val(m.kp_max, "kp_max");
-        get_val(m.kd_min, "kd_min");
-        get_val(m.kd_max, "kd_max");
-        get_val(m.t_min, "t_min");
-        get_val(m.t_max, "t_max");
-        get_val(m.kp_in_use, "kp_in_use");
-        get_val(m.kd_in_use, "kd_in_use");
+        // Defaults for optional fields (especially for api_type=5 minimal config).
+        m.p_min = -12.57f; m.p_max = 12.57f;
+        m.v_min = -50.0f;  m.v_max = 50.0f;
+        m.kp_min = 0.0f;   m.kp_max = 5000.0f;
+        m.kd_min = 0.0f;   m.kd_max = 100.0f;
+        m.t_min = -36.0f;  m.t_max = 36.0f;
+        m.kp_in_use = 20.0f; m.kd_in_use = 0.8f;
+        m.pos_min = 0.0f;  m.pos_max = 0.0f;
 
-        // 3. New Fields (新增字段)
-        get_val(m.pos_min, "pos_min");
-        get_val(m.pos_max, "pos_max");
+        if (m.api_type == 5) {
+            // HighTorque: allow compact config, most fields optional.
+            get_val(m.p_min, "p_min", false);
+            get_val(m.p_max, "p_max", false);
+            get_val(m.v_min, "v_min", false);
+            get_val(m.v_max, "v_max", false);
+            get_val(m.kp_min, "kp_min", false);
+            get_val(m.kp_max, "kp_max", false);
+            get_val(m.kd_min, "kd_min", false);
+            get_val(m.kd_max, "kd_max", false);
+            get_val(m.t_min, "t_min", false);
+            get_val(m.t_max, "t_max", false);
+            get_val(m.kp_in_use, "kp_in_use", false);
+            get_val(m.kd_in_use, "kd_in_use", false);
+            get_val(m.pos_min, "pos_min", false);
+            get_val(m.pos_max, "pos_max", false);
+        } else {
+            // Legacy protocols keep strict required fields.
+            get_val(m.p_min, "p_min");
+            get_val(m.p_max, "p_max");
+            get_val(m.v_min, "v_min");
+            get_val(m.v_max, "v_max");
+            get_val(m.kp_min, "kp_min");
+            get_val(m.kp_max, "kp_max");
+            get_val(m.kd_min, "kd_min");
+            get_val(m.kd_max, "kd_max");
+            get_val(m.t_min, "t_min");
+            get_val(m.t_max, "t_max");
+            get_val(m.kp_in_use, "kp_in_use");
+            get_val(m.kd_in_use, "kd_in_use");
+            get_val(m.pos_min, "pos_min");
+            get_val(m.pos_max, "pos_max");
+        }
 
         motor_list.push_back(m);
     }

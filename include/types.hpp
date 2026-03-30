@@ -29,7 +29,7 @@ inline float uint_to_float(int x_int, float x_min, float x_max, int bits)
 // 结构体定义
 typedef struct
 {
-    uint8_t mode;
+    uint8_t mode = 0;
     float position = 0.0f;
     float speed = 0.0f;
     float kp = 0.0f;
