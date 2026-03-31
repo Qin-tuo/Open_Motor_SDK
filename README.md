@@ -5,11 +5,9 @@
 
 ## 简介
 `khcan` 是一个基于 ROS 2 `ament_cmake` 的 SocketCAN 电机控制包。
-当前仓库中实际可用的入口程序只有 `show_status`，它会：
-- 从 `config/motor.toml` 读取电机与 CAN 通道配置
-- 初始化机器人对象
-- 关闭电机、清错、重新使能
-- 周期性查询所有电机位置并在终端打印状态
+当前仓库中可用的入口程序有：
+- `show_status`：从 `config/motor.toml` 读取配置，初始化并周期性查询所有电机状态
+- `test_mit_mode`：根据 `api_type` 自动切换到 MIT 模式（Type1/2/3/5），对单个电机执行正弦摆动测试
 
 ## 当前目录结构
 ```text
@@ -20,12 +18,14 @@ khcan/
 │   └── motor.toml
 ├── include/
 ├── main/
-│   └── show_status.cpp
+│   ├── show_status.cpp
+│   └── test_mit_mode.cpp
 └── src/
 ```
 
 ## 代码框架对应关系
 - `main/show_status.cpp`：程序入口，执行初始化、清错、使能和状态打印循环
+- `main/test_mit_mode.cpp`：通用 MIT 测试入口，自动适配 Type1/2/3/5 的 MIT 模式编号
 - `config/motor.toml`：电机编号、类型、CAN 通道、CAN ID 与控制参数配置
 - `src/config_loader.cpp`：加载 TOML 配置
 - `src/device.cpp`：SocketCAN 设备收发、接口打开与状态检查
@@ -238,7 +238,7 @@ sudo ip link set can4 type can bitrate 1000000
 sudo ip link set can4 up
 ```
 
-**Type5（高擎）在 MIT 模式下会发送 CAN FD 帧。若你使用 `main/test_hq_mit.cpp`，建议接口按 FD 模式配置：**
+**Type5（高擎）在 MIT 模式下会发送 CAN FD 帧。若你使用 `main/test_mit_mode.cpp`（可执行名 `test_mit_mode`），建议接口按 FD 模式配置：**
 ```bash
 sudo ip link set can0 type can bitrate 1000000 dbitrate 1000000 fd on
 sudo ip link set can0 up
@@ -280,7 +280,7 @@ double target_hz = 50.0;
 - 报错 `sendExtendedId(Fd)Frame: No buffer space available`：
   先检查 `ip -details -statistics link show canX`，重点看 `bus-errors`/`error-passive`/`bus-off`。
   Type5 MIT 下可优先确认 `HQ_CANFD_BRS`（默认不设置即关闭），并适当增大 `txqueuelen`。
-- `test_hq_mit` 有发送但电机不动、`p/v/t` 长时间不变：
+- `test_mit_mode` 有发送但电机不动、`p/v/t` 长时间不变：
   常见是总线未应答（波特率/BRS/接线/CAN ID不一致）。建议先抓包确认是否有电机回包，再核对 `type` 是否填写为具体型号（Type5 下影响力矩与增益缩放）。
 
 ```

@@ -26,8 +26,8 @@ add_executable(show_status
   ${RMROBOT_COMMON_SRCS}
 )
 
-add_executable(test_hq_mit
-  main/test_hq_mit.cpp
+add_executable(test_mit_mode
+  main/test_mit_mode.cpp
   ${RMROBOT_COMMON_SRCS}
 )
 
@@ -35,7 +35,7 @@ target_include_directories(show_status PRIVATE
   include
 )
 
-target_include_directories(test_hq_mit PRIVATE
+target_include_directories(test_mit_mode PRIVATE
   include
 )
 
@@ -43,7 +43,7 @@ target_link_libraries(show_status
   Threads::Threads
 )
 
-target_link_libraries(test_hq_mit
+target_link_libraries(test_mit_mode
   Threads::Threads
 )
 
@@ -51,11 +51,11 @@ ament_target_dependencies(show_status
   ament_index_cpp
 )
 
-ament_target_dependencies(test_hq_mit
+ament_target_dependencies(test_mit_mode
   ament_index_cpp
 )
 
-install(TARGETS show_status test_hq_mit
+install(TARGETS show_status test_mit_mode
   DESTINATION lib/${PROJECT_NAME}
 )
 
