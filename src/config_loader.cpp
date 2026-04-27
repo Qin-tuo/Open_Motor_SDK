@@ -102,8 +102,19 @@ std::vector<Motor_CAN_Info_Struct> MotorConfigLoader::loadConfig(const std::stri
         m.kp_in_use = 20.0f; m.kd_in_use = 0.8f;
         m.pos_min = 0.0f;  m.pos_max = 0.0f;
 
-        if (m.api_type == 5) {
-            // HighTorque: allow compact config, most fields optional.
+        if (m.api_type == 6) {
+            // PFL28/L28 uses [position(float), current(float)].
+            m.p_min = 0.0f;  m.p_max = 9.5f;
+            m.v_min = 0.0f;  m.v_max = 0.0f;
+            m.kp_min = 0.0f; m.kp_max = 0.0f;
+            m.kd_min = 0.0f; m.kd_max = 0.0f;
+            m.t_min = 0.0f;  m.t_max = 2.5f;
+            m.kp_in_use = 0.0f; m.kd_in_use = 0.0f;
+            m.pos_min = 0.0f; m.pos_max = 9.5f;
+        }
+
+        if (m.api_type == 5 || m.api_type == 6) {
+            // HighTorque/PFL28: allow compact config, most fields optional.
             get_val(m.p_min, "p_min", false);
             get_val(m.p_max, "p_max", false);
             get_val(m.v_min, "v_min", false);

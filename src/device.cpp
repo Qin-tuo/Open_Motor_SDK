@@ -100,6 +100,29 @@ static bool use_canfd_brs() {
     return std::string(env) == "1";
 }
 
+static bool pfl28_use_canfd_brs() {
+    // In field setups, long cabling often makes 5M data-phase unstable.
+    // Keep BRS off by default for robustness; users can enable via env.
+    const char* env = std::getenv("PFL28_CANFD_BRS");
+    if (!env) return false;
+    return std::string(env) == "1";
+}
+
+static bool pfl28_use_canfd_frame() {
+    // Official manual specifies CAN FD transport for PowerFlow L28.
+    // Keep CAN FD as default; allow temporary fallback via env for field debugging.
+    const char* env = std::getenv("PFL28_USE_CANFD");
+    if (!env) return true;
+    const std::string v(env);
+    return (v == "1" || v == "true" || v == "TRUE" || v == "on" || v == "ON");
+}
+
+static bool pfl28_allow_neg_current() {
+    const char* env = std::getenv("PFL28_ALLOW_NEG_CURRENT");
+    if (!env) return false;
+    return std::string(env) == "1";
+}
+
 struct HQTypeAdapt {
     float tq_k;
     float tq_d;
@@ -206,7 +229,7 @@ DeviceX::~DeviceX() {
     }
 }
 
-bool DeviceX::openSocket(const std::string& iface, bool enable_canfd) {
+bool DeviceX::openSocket(const std::string& iface, bool enable_canfd, int dbitrate) {
     socket_fd = socket(PF_CAN, SOCK_RAW, CAN_RAW);
     if (socket_fd < 0) {
         std::perror("socket");
@@ -247,7 +270,7 @@ bool DeviceX::openSocket(const std::string& iface, bool enable_canfd) {
         std::cerr << "[Info] Attempting to bring up " << iface << " (process has CAP_NET_ADMIN)..." << std::endl;
         bool ok = false;
         for (int attempt = 0; attempt < 3; ++attempt) {
-            if (tryBringUpInterface(iface, 1000000, enable_canfd, 1000000)) {
+            if (tryBringUpInterface(iface, 1000000, enable_canfd, dbitrate)) {
                 if (ioctl(socket_fd, SIOCGIFFLAGS, &ifr2) == 0 && (ifr2.ifr_flags & IFF_UP)) {
                     ok = true;
                     break;
@@ -311,16 +334,24 @@ bool DeviceX::Init(const std::string& iface, int dev_idx,
     p_mapper = mapper_ptr;
 
     bool need_canfd = false;
+    int dbitrate = 1000000;
     if (p_motors_data) {
         for (const auto& motor : *p_motors_data) {
-            if (motor.info.device_index == dev_idx && motor.info.api_type == 5) {
+            if (motor.info.device_index != dev_idx) {
+                continue;
+            }
+            if (motor.info.api_type == 5) {
                 need_canfd = true;
-                break;
+            } else if (motor.info.api_type == 6) {
+                if (pfl28_use_canfd_frame()) {
+                    need_canfd = true;
+                    dbitrate = 5000000;
+                }
             }
         }
     }
 
-    if (!openSocket(iface_name, need_canfd)) {
+    if (!openSocket(iface_name, need_canfd, dbitrate)) {
         std::cerr << "[Error] Failed to open socketcan interface: " << iface_name << std::endl;
         return false;
     }
@@ -435,6 +466,17 @@ void DeviceX::sendStandardFrame(uint32_t can_id, const uint8_t* data, uint8_t dl
     sendFrameWithRetry(&frame, sizeof(frame), "sendStandardFrame");
 }
 
+void DeviceX::sendStandardFdFrame(uint32_t can_id, const uint8_t* data, uint8_t len, bool brs) {
+    if (socket_fd < 0 || len > CANFD_MAX_DLEN) return;
+
+    struct canfd_frame frame {};
+    frame.can_id = (can_id & CAN_SFF_MASK);
+    frame.len = len;
+    frame.flags = brs ? CANFD_BRS : 0;
+    std::memcpy(frame.data, data, len);
+    sendFrameWithRetry(&frame, sizeof(frame), "sendStandardFdFrame");
+}
+
 void DeviceX::sendRawFrame(uint8_t chan, uint32_t type, uint16_t data_area, uint8_t motor_id, uint8_t* data) {
     (void)chan;
     sendExtendedFrame(type, data_area, motor_id, data);
@@ -454,6 +496,7 @@ void DeviceX::EnableMotor(int& motor_index) {
     else if (type == 3) EnableMotor_Type3(motor_index);
     else if (type == 4) EnableMotor_Type4(motor_index);
     else if (type == 5) EnableMotor_Type5(motor_index);
+    else if (type == 6) EnableMotor_Type6(motor_index);
 }
 
 void DeviceX::DisableMotor(int& motor_index) {
@@ -466,6 +509,7 @@ void DeviceX::DisableMotor(int& motor_index) {
     else if (type == 3) DisableMotor_Type3(motor_index);
     else if (type == 4) DisableMotor_Type4(motor_index);
     else if (type == 5) DisableMotor_Type5(motor_index);
+    else if (type == 6) DisableMotor_Type6(motor_index);
 }
 
 void DeviceX::ClearError(int& motor_index) {
@@ -478,6 +522,7 @@ void DeviceX::ClearError(int& motor_index) {
     else if (type == 3) ClearError_Type3(motor_index);
     else if (type == 4) ClearError_Type4(motor_index);
     else if (type == 5) ClearError_Type5(motor_index);
+    else if (type == 6) ClearError_Type6(motor_index);
 }
 
 void DeviceX::SetZero(int& motor_index) {
@@ -490,6 +535,7 @@ void DeviceX::SetZero(int& motor_index) {
     else if (type == 3) SetZero_Type3(motor_index);
     else if (type == 4) SetZero_Type4(motor_index);
     else if (type == 5) SetZero_Type5(motor_index);
+    else if (type == 6) SetZero_Type6(motor_index);
 }
 
 void DeviceX::SetMode(int& motor_index, int mode) {
@@ -502,6 +548,7 @@ void DeviceX::SetMode(int& motor_index, int mode) {
     else if (type == 3) SetMode_Type3(motor_index, mode);
     else if (type == 4) SetMode_Type4(motor_index, mode);
     else if (type == 5) SetMode_Type5(motor_index, mode);
+    else if (type == 6) SetMode_Type6(motor_index, mode);
 }
 
 void DeviceX::SendCommand(int& motor_index) {
@@ -517,6 +564,7 @@ void DeviceX::SendCommand(int& motor_index) {
     else if (type == 3) SendCommand_Type3(motor_index);
     else if (type == 4) SendCommand_Type4(motor_index);
     else if (type == 5) SendCommand_Type5(motor_index);
+    else if (type == 6) SendCommand_Type6(motor_index);
 }
 
 void DeviceX::QueryPos(int& motor_index) {
@@ -529,6 +577,7 @@ void DeviceX::QueryPos(int& motor_index) {
     else if (type == 3) QueryPos_Type3(motor_index);
     else if (type == 4) QueryPos_Type4(motor_index);
     else if (type == 5) QueryPos_Type5(motor_index);
+    else if (type == 6) QueryPos_Type6(motor_index);
 }
 
 // =========================================================
@@ -1060,6 +1109,79 @@ void DeviceX::QueryPos_Type5(int& motor_index) {
 }
 
 // =========================================================
+//  Type 6 (AgiBot PowerFlow L28/PFL28)
+// =========================================================
+
+void DeviceX::EnableMotor_Type6(int& motor_index) {
+    // PFL28 powers up in enabled state.
+    (void)motor_index;
+}
+
+void DeviceX::DisableMotor_Type6(int& motor_index) {
+    // No dedicated disable command in PFL28 public protocol.
+    // Send a zero-current hold at the latest known position as a safe fallback.
+    if (!p_motors_data) return;
+    auto& motor = (*p_motors_data)[motor_index];
+    motor.send.position = motor.recv.current_position_f.load();
+    motor.send.torque = 0.0f;
+    SendCommand_Type6(motor_index);
+}
+
+void DeviceX::ClearError_Type6(int& motor_index) {
+    // No clear-error frame is documented for PFL28.
+    (void)motor_index;
+}
+
+void DeviceX::SetZero_Type6(int& motor_index) {
+    // No set-zero frame is documented for PFL28.
+    (void)motor_index;
+}
+
+void DeviceX::SetMode_Type6(int& motor_index, int mode) {
+    // PFL28 uses position/current command frame; keep mode for compatibility.
+    (*p_motors_data)[motor_index].send.mode = static_cast<uint8_t>(mode);
+}
+
+void DeviceX::SendCommand_Type6(int& motor_index) {
+    const auto& motor = (*p_motors_data)[motor_index];
+    const auto& info = motor.info;
+    const bool allow_neg_i = pfl28_allow_neg_current();
+
+    const float pos_min = (info.p_max > info.p_min) ? info.p_min : 0.0f;
+    const float pos_max = (info.p_max > info.p_min) ? info.p_max : 9.5f;
+    const float cur_max = (info.t_max > info.t_min) ? info.t_max : 2.5f;
+    float cur_min = (info.t_max > info.t_min) ? info.t_min : 0.0f;
+    if (allow_neg_i && cur_min >= 0.0f) {
+        cur_min = -cur_max;
+    }
+
+    float pos_cmd = motor.send.position;
+    float cur_cmd = motor.send.torque;
+
+    if (!std::isfinite(pos_cmd)) pos_cmd = 0.0f;
+    if (!std::isfinite(cur_cmd)) cur_cmd = 0.0f;
+
+    pos_cmd = std::max(pos_min, std::min(pos_max, pos_cmd));
+    cur_cmd = std::max(cur_min, std::min(cur_max, cur_cmd));
+
+    uint8_t data[8] = {0};
+    std::memcpy(&data[0], &pos_cmd, sizeof(float)); // little-endian float
+    std::memcpy(&data[4], &cur_cmd, sizeof(float)); // little-endian float
+
+    if (pfl28_use_canfd_frame()) {
+        sendStandardFdFrame(static_cast<uint32_t>(info.canid), data, sizeof(data), pfl28_use_canfd_brs());
+    } else {
+        sendStandardFrame(static_cast<uint32_t>(info.canid), data, sizeof(data));
+    }
+}
+
+void DeviceX::QueryPos_Type6(int& motor_index) {
+    // PFL28 returns state after each control frame; no standalone query frame documented.
+    // We keep this as no-op to avoid accidental motion during status polling loops.
+    (void)motor_index;
+}
+
+// =========================================================
 //  Receive Loop
 // =========================================================
 
@@ -1093,6 +1215,9 @@ void DeviceX::ReceiveLoop() {
                 parsed_motor_id = canID - 0x180;
             } else if (canID >= 0x201 && canID <= 0x208) {
                 parsed_motor_id = canID - 0x200;
+            } else if (canID > 0 && canID <= 0x7F) {
+                // PFL28/L28 P2P frames: CAN ID is node id.
+                parsed_motor_id = static_cast<int>(canID);
             } else if ((((canID >> 8) & 0x7F) > 0) && ((canID & 0x7F) == 0 || (canID & 0x7F) == 0x7F)) {
                 // HighTorque reply id format: [src(7bit)][dst(7bit)].
                 parsed_motor_id = static_cast<int>((canID >> 8) & 0x7F);
@@ -1104,6 +1229,19 @@ void DeviceX::ReceiveLoop() {
         if (parsed_motor_id < 0) continue;
 
         int g_idx = p_mapper->get_id({(uint)device_global_index, (uint)rx_channel, (uint)parsed_motor_id});
+
+        // Fallback for protocols that carry motor id in payload nibble.
+        if (g_idx < 0 && !is_eff && frame_len > 0) {
+            const int alt_motor_id = frame.data[0] & 0x0F;
+            if (alt_motor_id != parsed_motor_id) {
+                const int alt_idx = p_mapper->get_id(
+                    {(uint)device_global_index, (uint)rx_channel, (uint)alt_motor_id});
+                if (alt_idx >= 0) {
+                    parsed_motor_id = alt_motor_id;
+                    g_idx = alt_idx;
+                }
+            }
+        }
 
         if (g_idx < 0 || g_idx >= (int)p_motors_data->size()) continue;
 
@@ -1190,6 +1328,31 @@ void DeviceX::ReceiveLoop() {
             motor.recv.current_temp_f.store((float)temp);
             motor.recv.motor_id = (uint8_t)parsed_motor_id;
             motor.recv.fault_message = 0;
+        } else if (motor.info.api_type == 6 && !(frame.can_id & CAN_EFF_FLAG) && frame_len >= 8) {
+            float pos_feedback = 0.0f;
+            float cur_feedback = 0.0f;
+            std::memcpy(&pos_feedback, &frame.data[0], sizeof(float));
+            std::memcpy(&cur_feedback, &frame.data[4], sizeof(float));
+
+            if (std::isfinite(pos_feedback)) {
+                motor.recv.current_position_f.store(pos_feedback);
+            }
+            if (std::isfinite(cur_feedback)) {
+                motor.recv.current_torque_f.store(cur_feedback);
+                motor.recv.current_iq_f.store(cur_feedback);
+            }
+            motor.recv.current_speed_f.store(0.0f);
+            motor.recv.motor_id = static_cast<uint8_t>(parsed_motor_id);
+            motor.recv.mode = motor.send.mode;
+            motor.recv.motor_state = 1; // full state frame (pos+cur)
+            motor.recv.fault_message = 0;
+        } else if (motor.info.api_type == 6 && !(frame.can_id & CAN_EFF_FLAG) && frame_len == 4) {
+            // Some PFL28 firmwares return compact status/error frames.
+            // Observed pattern: [0x07, 0x02, 0x00, err_code].
+            motor.recv.motor_id = static_cast<uint8_t>(parsed_motor_id);
+            motor.recv.mode = frame.data[0];
+            motor.recv.motor_state = 2; // compact status/error frame
+            motor.recv.fault_message = frame.data[3];
         } else if (motor.info.api_type == 5) {
             if (frame_len < 2) continue;
             const HQTypeAdapt adapt = get_hq_type_adapt(motor.info.type);

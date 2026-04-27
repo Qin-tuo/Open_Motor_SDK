@@ -39,13 +39,14 @@ public:
     void ReceiveLoop();
 
 private:
-    bool openSocket(const std::string& iface, bool enable_canfd);
+    bool openSocket(const std::string& iface, bool enable_canfd, int dbitrate = 1000000);
     bool sendFrameWithRetry(const void* frame, std::size_t frame_size, const char* tag);
 
     void sendExtendedFrame(uint32_t type, uint16_t data_area, uint8_t motor_id, const uint8_t* data);
     void sendExtendedIdFrame(uint32_t can_id, const uint8_t* data, uint8_t dlc = 8);
     void sendExtendedIdFdFrame(uint32_t can_id, const uint8_t* data, uint8_t len);
     void sendStandardFrame(uint32_t can_id, const uint8_t* data, uint8_t dlc = 8);
+    void sendStandardFdFrame(uint32_t can_id, const uint8_t* data, uint8_t len, bool brs);
     void sendRawFrame(uint8_t chan, uint32_t type, uint16_t data_area, uint8_t motor_id, uint8_t* data);
     std::atomic<unsigned long long> enobufs_drop_count{0};
     std::atomic<unsigned long long> last_enobufs_log_ms{0};
@@ -94,4 +95,13 @@ private:
     void SetMode_Type5(int& motor_index, int mode);
     void SendCommand_Type5(int& motor_index);
     void QueryPos_Type5(int& motor_index);
+
+    // Type 6 (AgiBot PowerFlow L28/PFL28)
+    void EnableMotor_Type6(int& motor_index);
+    void DisableMotor_Type6(int& motor_index);
+    void ClearError_Type6(int& motor_index);
+    void SetZero_Type6(int& motor_index);
+    void SetMode_Type6(int& motor_index, int mode);
+    void SendCommand_Type6(int& motor_index);
+    void QueryPos_Type6(int& motor_index);
 };

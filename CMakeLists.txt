@@ -31,11 +31,20 @@ add_executable(test_mit_mode
   ${RMROBOT_COMMON_SRCS}
 )
 
+add_executable(test_pfl28
+  main/test_pfl28.cpp
+  ${RMROBOT_COMMON_SRCS}
+)
+
 target_include_directories(show_status PRIVATE
   include
 )
 
 target_include_directories(test_mit_mode PRIVATE
+  include
+)
+
+target_include_directories(test_pfl28 PRIVATE
   include
 )
 
@@ -47,6 +56,10 @@ target_link_libraries(test_mit_mode
   Threads::Threads
 )
 
+target_link_libraries(test_pfl28
+  Threads::Threads
+)
+
 ament_target_dependencies(show_status
   ament_index_cpp
 )
@@ -55,7 +68,11 @@ ament_target_dependencies(test_mit_mode
   ament_index_cpp
 )
 
-install(TARGETS show_status test_mit_mode
+ament_target_dependencies(test_pfl28
+  ament_index_cpp
+)
+
+install(TARGETS show_status test_mit_mode test_pfl28
   DESTINATION lib/${PROJECT_NAME}
 )
 

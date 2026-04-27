@@ -1,12 +1,4 @@
 motors = [
-  { num = 1, name = "L_HIP_R", type = "DM4340P", api_type = 3, chan = 0, canid = 2, p_min = -12.5, p_max = 12.5, v_min = -8, v_max = 8, kp_min = 0, kp_max = 500, kd_min = 0, kd_max = 5, t_min = -28, t_max = 28, kp_in_use = 10, kd_in_use = 1, pos_min = 0.0, pos_max = 0.0},
-  { num = 2, name = "L_HIP_P", type = "DM4340P", api_type = 3, chan = 0, canid = 4, p_min = -12.5, p_max = 12.5, v_min = -8, v_max = 8, kp_min = 0, kp_max = 500, kd_min = 0, kd_max = 5, t_min = -28, t_max = 28, kp_in_use = 10, kd_in_use = 1, pos_min = 0.0, pos_max = 0.0},
-  { num = 3, name = "L_KNEE_P", type = "DM4340P", api_type = 3, chan = 0, canid = 6, p_min = -12.5, p_max = 12.5, v_min = -8, v_max = 8, kp_min = 0, kp_max = 500, kd_min = 0, kd_max = 5, t_min = -28, t_max = 28, kp_in_use = 10, kd_in_use = 1, pos_min = 0.0, pos_max = 0.0},
-  { num = 4, name = "L_FOOT_P", type = "DM4340P", api_type = 3, chan = 0, canid = 8, p_min = -12.5, p_max = 12.5, v_min = -8, v_max = 8, kp_min = 0, kp_max = 500, kd_min = 0, kd_max = 5, t_min = -28, t_max = 28, kp_in_use = 10, kd_in_use = 1, pos_min = 0.0, pos_max = 0.0},
-  { num = 5, name = "R_HIP_R", type = "DM4340P", api_type = 3, chan = 1, canid = 1, p_min = -12.5, p_max = 12.5, v_min = -8, v_max = 8, kp_min = 0, kp_max = 500, kd_min = 0, kd_max = 5, t_min = -28, t_max = 28, kp_in_use = 10, kd_in_use = 1, pos_min = 0.0, pos_max = 0.0},
-  { num = 6, name = "R_HIP_P", type = "DM4340P", api_type = 3, chan = 1, canid = 3, p_min = -12.5, p_max = 12.5, v_min = -8, v_max = 8, kp_min = 0, kp_max = 500, kd_min = 0, kd_max = 5, t_min = -28, t_max = 28, kp_in_use = 10, kd_in_use = 1, pos_min = 0.0, pos_max = 0.0},
-  { num = 7, name = "R_KNEE_P", type = "DM4340P", api_type = 3, chan = 1, canid = 5, p_min = -12.5, p_max = 12.5, v_min = -8, v_max = 8, kp_min = 0, kp_max = 500, kd_min = 0, kd_max = 5, t_min = -28, t_max = 28, kp_in_use = 10, kd_in_use = 1, pos_min = 0.0, pos_max = 0.0},
-  { num = 8, name = "R_FOOT_P", type = "DM4340P", api_type = 3, chan = 1, canid = 7, p_min = -12.5, p_max = 12.5, v_min = -8, v_max = 8, kp_min = 0, kp_max = 500, kd_min = 0, kd_max = 5, t_min = -28, t_max = 28, kp_in_use = 10, kd_in_use = 1, pos_min = 0.0, pos_max = 0.0},
-  { num = 9, name = "L_FOOT", type = "LK9025", api_type = 2, chan = 2, canid = 2, p_min = 0, p_max = 0, v_min = 0, v_max = 0, kp_min = 0, kp_max = 0, kd_min = 0, kd_max = 0, t_min = 0, t_max = 0, kp_in_use = 0, kd_in_use = 1, pos_min = 0.0, pos_max = 0.0 },
-  { num = 10, name = "R_FOOT", type = "LK9025", api_type = 2, chan = 3, canid = 1, p_min = 0, p_max = 0, v_min = 0, v_max = 0, kp_min = 0, kp_max = 0, kd_min = 0, kd_max = 0, t_min = 0, t_max = 0, kp_in_use = 0, kd_in_use = 1, pos_min = 0.0, pos_max = 0.0 },
+  { num = 11, name = "R_PUSHROD", type = "PFL28", api_type = 6, chan = 5, canid = 7, p_min = 0.0, p_max = 9.5, t_min = 0.0, t_max = 2.5, pos_min = 0.0, pos_max = 9.5},
 ]
+  
