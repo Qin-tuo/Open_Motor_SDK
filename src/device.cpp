@@ -100,21 +100,28 @@ static bool use_canfd_brs() {
     return std::string(env) == "1";
 }
 
+static bool env_bool(const char* key, bool default_val) {
+    const char* env = std::getenv(key);
+    if (!env) return default_val;
+    const std::string v(env);
+    return (v == "1" || v == "true" || v == "TRUE" || v == "on" || v == "ON");
+}
+
+static bool pfl28_use_xyber_mode() {
+    // AgiBot X1 drives L28 through DCU CAN-FD broadcast slots at 1 kHz.
+    return env_bool("PFL28_XYBER_MODE", true);
+}
+
 static bool pfl28_use_canfd_brs() {
-    // In field setups, long cabling often makes 5M data-phase unstable.
-    // Keep BRS off by default for robustness; users can enable via env.
     const char* env = std::getenv("PFL28_CANFD_BRS");
-    if (!env) return false;
-    return std::string(env) == "1";
+    if (!env) return pfl28_use_xyber_mode();
+    return env_bool("PFL28_CANFD_BRS", false);
 }
 
 static bool pfl28_use_canfd_frame() {
     // Official manual specifies CAN FD transport for PowerFlow L28.
     // Keep CAN FD as default; allow temporary fallback via env for field debugging.
-    const char* env = std::getenv("PFL28_USE_CANFD");
-    if (!env) return true;
-    const std::string v(env);
-    return (v == "1" || v == "true" || v == "TRUE" || v == "on" || v == "ON");
+    return env_bool("PFL28_USE_CANFD", true);
 }
 
 static bool pfl28_allow_neg_current() {
@@ -181,7 +188,7 @@ static bool tryBringUpInterface(const std::string& iface,
     std::string cmd = "ip link set " + iface + " down 2>/dev/null && ";
     cmd += "ip link set " + iface + " type can bitrate " + std::to_string(bitrate);
     if (enable_canfd) {
-        cmd += " dbitrate " + std::to_string(dbitrate) + " fd on";
+        cmd += " sample-point 0.8 dbitrate " + std::to_string(dbitrate) + " dsample-point 0.75 fd on";
     }
     cmd += " 2>/dev/null && ";
     cmd += "ip link set " + iface + " up 2>/dev/null";
@@ -1164,13 +1171,23 @@ void DeviceX::SendCommand_Type6(int& motor_index) {
     pos_cmd = std::max(pos_min, std::min(pos_max, pos_cmd));
     cur_cmd = std::max(cur_min, std::min(cur_max, cur_cmd));
 
-    uint8_t data[8] = {0};
-    std::memcpy(&data[0], &pos_cmd, sizeof(float)); // little-endian float
-    std::memcpy(&data[4], &cur_cmd, sizeof(float)); // little-endian float
-
     if (pfl28_use_canfd_frame()) {
-        sendStandardFdFrame(static_cast<uint32_t>(info.canid), data, sizeof(data), pfl28_use_canfd_brs());
+        if (pfl28_use_xyber_mode() && info.canid >= 1 && info.canid <= 8) {
+            uint8_t data[64] = {0};
+            const std::size_t offset = static_cast<std::size_t>(info.canid - 1) * 8U;
+            std::memcpy(&data[offset], &pos_cmd, sizeof(float));       // little-endian float
+            std::memcpy(&data[offset + 4], &cur_cmd, sizeof(float));   // little-endian float
+            sendStandardFdFrame(0, data, sizeof(data), pfl28_use_canfd_brs());
+        } else {
+            uint8_t data[8] = {0};
+            std::memcpy(&data[0], &pos_cmd, sizeof(float)); // little-endian float
+            std::memcpy(&data[4], &cur_cmd, sizeof(float)); // little-endian float
+            sendStandardFdFrame(static_cast<uint32_t>(info.canid), data, sizeof(data), pfl28_use_canfd_brs());
+        }
     } else {
+        uint8_t data[8] = {0};
+        std::memcpy(&data[0], &pos_cmd, sizeof(float)); // little-endian float
+        std::memcpy(&data[4], &cur_cmd, sizeof(float)); // little-endian float
         sendStandardFrame(static_cast<uint32_t>(info.canid), data, sizeof(data));
     }
 }
@@ -1205,6 +1222,35 @@ void DeviceX::ReceiveLoop() {
         uint8_t rx_channel = 0;
         const bool is_eff = (frame.can_id & CAN_EFF_FLAG) != 0;
         const uint32_t canID = frame.can_id & (is_eff ? CAN_EFF_MASK : CAN_SFF_MASK);
+
+        if (!is_eff && canID == 0 && frame_len >= 64 && p_motors_data) {
+            for (int idx = 0; idx < static_cast<int>(p_motors_data->size()); ++idx) {
+                Motor_CAN_Struct& motor = (*p_motors_data)[idx];
+                if (motor.info.device_index != device_global_index ||
+                    motor.info.api_type != 6 ||
+                    motor.info.canid < 1 ||
+                    motor.info.canid > 8) {
+                    continue;
+                }
+
+                const std::size_t offset = static_cast<std::size_t>(motor.info.canid - 1) * 8U;
+                const float pos_feedback = read_le_f32(&frame.data[offset]);
+                const float cur_feedback = read_le_f32(&frame.data[offset + 4]);
+                if (std::isfinite(pos_feedback)) {
+                    motor.recv.current_position_f.store(pos_feedback);
+                }
+                if (std::isfinite(cur_feedback)) {
+                    motor.recv.current_torque_f.store(cur_feedback);
+                    motor.recv.current_iq_f.store(cur_feedback);
+                }
+                motor.recv.current_speed_f.store(0.0f);
+                motor.recv.motor_id = static_cast<uint8_t>(motor.info.canid);
+                motor.recv.mode = motor.send.mode;
+                motor.recv.motor_state = 1;
+                motor.recv.fault_message = 0;
+            }
+            continue;
+        }
 
         if (is_eff) {
             parsed_motor_id = (canID >> 8) & 0xFF;

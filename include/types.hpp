@@ -62,7 +62,7 @@ struct Motor_CAN_Receive_Struct
         current_speed_f = 0.0f;
         current_torque_f = 0.0f;
         current_temp_f = 0.0f;
-        current_iq_f;
+        current_iq_f = 0.0f;
     }
 
     Motor_CAN_Receive_Struct(const Motor_CAN_Receive_Struct &other)

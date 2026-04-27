@@ -4,11 +4,11 @@
 # **Type5（高擎）和 Type6（PFL28）默认使用 CAN FD。**
 
 ## 简介
-`khcan` 是一个基于 ROS 2 `ament_cmake` 的 SocketCAN 电机控制包。
+`khcan` 是一个基于 ROS 2 `ament_cmake` 的 SocketCAN 电机驱动包。
+当前包会安装可复用驱动库 `libkhcan_driver.so`，其他 ROS 2 工程可直接链接该库进行控制；`main/` 下仅保留少量诊断入口。
 当前仓库中可用的入口程序有：
 - `show_status`：从 `config/motor.toml` 读取配置，初始化并周期性查询所有电机状态
 - `test_mit_mode`：根据 `api_type` 自动切换到 MIT 模式（Type1/2/3/5），对单个电机执行正弦摆动测试
-- `test_pfl28`：针对 `api_type=6`（PFL28）发送位置+电流命令并打印反馈
 
 ## 当前目录结构
 ```text
@@ -27,7 +27,6 @@ khcan/
 ## 代码框架对应关系
 - `main/show_status.cpp`：程序入口，执行初始化、清错、使能和状态打印循环
 - `main/test_mit_mode.cpp`：通用 MIT 测试入口，自动适配 Type1/2/3/5 的 MIT 模式编号
-- `main/test_pfl28.cpp`：PFL28 测试入口（正弦位置指令 + 限幅电流）
 - `config/motor.toml`：电机编号、类型、CAN 通道、CAN ID 与控制参数配置
 - `src/config_loader.cpp`：加载 TOML 配置
 - `src/device.cpp`：SocketCAN 设备收发、接口打开与状态检查
@@ -180,6 +179,20 @@ config/motor.toml
 - `5`：Type5（高擎 16-bit ID 协议）
 - `6`：Type6（AgiBot PFL28/L28，`pos(float)+current(float)`）
 
+### 驱动能力确认
+当前清理只删除了独立测试/排障入口，不影响底层电机驱动能力。`DeviceX` 仍保留 Type1~Type6 的使能、失能、清错、设零、设模式、发送命令和查询位置分发；`ReceiveLoop()` 仍保留对应反馈解析路径。
+
+| `api_type` | 驱动能力 | 当前诊断入口 |
+|---|---|---|
+| `1` | 保留 Type1 协议发送与反馈解析 | `test_mit_mode` 可用于 MIT 模式简单验证 |
+| `2` | 保留 Type2 协议发送与反馈解析 | `test_mit_mode` 可用于 MIT 模式简单验证 |
+| `3` | 保留 Type3 协议发送与反馈解析 | `test_mit_mode` 可用于 MIT 模式简单验证 |
+| `4` | 保留 Type4 / C620 协议发送与反馈解析 | 可通过 `show_status` 查看状态 |
+| `5` | 保留 Type5 / 高擎 CAN FD 协议发送与反馈解析 | `test_mit_mode` 可用于 MIT 模式简单验证 |
+| `6` | 保留 Type6 / PFL28 协议发送与反馈解析 | 独立 PFL28 诊断入口已删除，请通过库 API 控制 |
+
+也就是说，其他类型电机仍通过 `BaseRobot::Move_N()` / `BaseRobot::Move()` 进入统一发送路径，按各自 `api_type` 分发到对应 `SendCommand_TypeX()`。
+
 ### 关键说明
 - `chan` 会转换成设备名 `can<chan>`。例如 `chan = 1` 会使用 `can1`。
 - `type` 不参与协议分发（协议分发只看 `api_type`），但在 `api_type=5`（高擎）时会用于型号缩放适配：
@@ -210,6 +223,44 @@ colcon build --packages-select khcan --symlink-install
 source install/setup.bash
 ```
 
+安装后会包含：
+- `lib/libkhcan_driver.so`：可被其他工程链接的驱动库
+- `include/*.hpp`：公开头文件
+- `share/khcan/config/motor.toml`：默认配置文件
+- `ros2 run khcan show_status`
+- `ros2 run khcan test_mit_mode`
+
+### 作为驱动库植入其他工程
+在下游 ROS 2 包中可直接 `find_package(khcan)` 并链接导出的 CMake target：
+```cmake
+find_package(khcan REQUIRED)
+
+add_executable(my_controller src/my_controller.cpp)
+target_link_libraries(my_controller
+  khcan::khcan_driver
+)
+```
+
+最小调用示例：
+```cpp
+#include "robot.hpp"
+
+int main() {
+    BaseRobot robot("/path/to/motor.toml");
+
+    robot.Enable_N(0);
+
+    MotorCmdVec cmd{};
+    cmd.p = 1.0f;
+    cmd.v = 0.0f;
+    cmd.t = 1.0f;
+    robot.Move_N(0, cmd);
+
+    robot.Disable_N(0);
+    return 0;
+}
+```
+
 如果当前终端使用 Conda，推荐这样构建：
 ```bash
 PYTHON_EXECUTABLE=/usr/bin/python3 colcon build \
@@ -223,48 +274,10 @@ source install/setup.bash
 当前仓库没有 `launch` 文件，直接运行可执行程序即可：
 ```bash
 ros2 run khcan show_status
-ros2 run khcan test_pfl28   # 仅测试 api_type=6 电机
+ros2 run khcan test_mit_mode
 ```
 
-`test_pfl28` 常用调参环境变量：
-```bash
-export PFL28_TEST_CURRENT=2.0   # 推杆电流指令(A)
-export PFL28_UP_CURRENT=2.0     # 上行阶段电流
-export PFL28_DOWN_CURRENT=2.5   # 下行阶段电流（建议先给大一点）
-export PFL28_ALLOW_NEG_CURRENT=0 # 若固件需要负电流回缩可设为1，并把 DOWN_CURRENT 设为负值
-export PFL28_WARMUP_SEC=6       # 上电自动回零等待时间
-export PFL28_FORCE_ZERO_SEC=2   # 启动后先强制 set_pos(0) 的时间（默认2s，建议保留）
-export PFL28_FEEDBACK_WAIT_SEC=2 # 起步前等待完整状态回包的时间，避免用默认0作为反馈
-export PFL28_STALL_ABORT_SEC=4   # 检测到“有误差但零电流且位置不变”超过该时间就报错退出；设0可禁用
-export PFL28_PHASE_TIMEOUT_SEC=6 # 单阶段最长持续时间（到不了位也会换向）
-export PFL28_SWITCH_EPS=0.03     # 到位误差阈值
-export PFL28_STABLE_COUNT=8      # 连续到位判定次数（20ms*8≈160ms）
-export PFL28_CMD_PERIOD_MS=20    # 发送周期(ms)，可调大到50/100排查节奏问题
-export PFL28_MAX_STEP=0.05       # 每20ms最大位置步长，避免大跳变被拒绝
-export PFL28_HIGH_POS=7.6       # 高位目标(0~10)
-export PFL28_LOW_POS=1.9        # 低位目标(0~10)
-# L28 推荐范围：pos 0~9.5，current 0~2.5（默认 CAN FD）。
-export PFL28_USE_CANFD=1         # 1=CANFD(默认), 0=经典CAN(仅排障临时使用)
-# 仅在 PFL28_USE_CANFD=1 时，BRS 生效：
-export PFL28_CANFD_BRS=0
-ros2 run khcan test_pfl28
-```
-
-若日志持续出现以下组合：
-- `fb_cur≈0`
-- `fb_pos` 长时间几乎不变
-- 且 `cmd_pos` 与 `fb_pos` 误差较大
-
-`test_pfl28` 现在会在超时后主动退出并提示“使能链/电源链”问题。该场景通常不是协议发送失败，而是执行器未真正进入可出力状态（如电源、ESTOP、或上电自检/回零异常）。
-
-扫描 PFL28 实际 ID（点对点模式）：
-```bash
-# 用法: scan_pfl28_id.sh <ifname> <start_id> <end_id>
-./scripts/scan_pfl28_id.sh can2 1 127
-
-# 可选参数（环境变量）
-PFL28_SCAN_BRS=0 PFL28_SCAN_TRIES=3 PFL28_SCAN_WAIT_MS=80 ./scripts/scan_pfl28_id.sh can2 1 127
-```
+PFL28 独立排障入口已删除。Type6/PFL28 驱动仍保留在库中，业务代码请通过 `BaseRobot` 直接发送位置/电流命令。
 
 ## CAN 接口准备
 程序依赖 `motor.toml` 中声明的 `canX` 接口。
@@ -297,11 +310,11 @@ Type5 `mode=0` 使用 MIT2 组合帧（设模式 + 写 `pos/vel/tqe` + 写 `kp/k
 
 PFL28（Type6）建议按 CAN FD 配置：
 ```bash
-sudo ip link set can0 type can bitrate 1000000 dbitrate 5000000 fd on
+sudo ip link set can0 type can bitrate 1000000 sample-point 0.8 dbitrate 5000000 dsample-point 0.75 fd on
 sudo ip link set can0 up
 ```
 若现场链路兼容性排障，可临时改成经典 CAN（`PFL28_USE_CANFD=0`）。
-Type6 协议帧为标准 ID（`canid`）+ 8 字节数据：`position(float32 LE)` + `current(float32 LE)`。
+Type6 默认采用智元/Xyber 风格：标准 ID `0` 的 64 字节 CAN FD 广播帧，每个电机按 `canid - 1` 写入 8 字节槽位：`position(float32 LE)` + `current(float32 LE)`。如需退回 P2P 标准 ID `canid` + 8 字节帧，可设置 `PFL28_XYBER_MODE=0`。
 
 代码中也会在接口存在但未启动时尝试拉起接口；如果权限不足，会提示你：
 - 使用 `sudo` 运行程序

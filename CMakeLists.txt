@@ -1,8 +1,9 @@
 cmake_minimum_required(VERSION 3.10)
-project(khcan)
+project(khcan VERSION 0.1.0)
 
 set(Python3_FIND_VIRTUALENV STANDARD)
-if(EXISTS "/usr/bin/python3" AND (NOT DEFINED Python3_EXECUTABLE OR Python3_EXECUTABLE MATCHES "miniconda|anaconda|conda"))
+if(EXISTS "/usr/bin/python3" AND
+   (NOT DEFINED Python3_EXECUTABLE OR Python3_EXECUTABLE MATCHES "miniconda|anaconda|conda"))
   set(Python3_EXECUTABLE "/usr/bin/python3" CACHE FILEPATH "Python interpreter for ament" FORCE)
 endif()
 
@@ -14,78 +15,61 @@ find_package(ament_cmake REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 find_package(Threads REQUIRED)
 
-set(RMROBOT_COMMON_SRCS
+set(KHCAN_DRIVER_SRCS
   src/config_loader.cpp
   src/device.cpp
   src/mapper.cpp
   src/robot.cpp
 )
 
-add_executable(show_status
-  main/show_status.cpp
-  ${RMROBOT_COMMON_SRCS}
+add_library(khcan_driver SHARED
+  ${KHCAN_DRIVER_SRCS}
 )
 
-add_executable(test_mit_mode
-  main/test_mit_mode.cpp
-  ${RMROBOT_COMMON_SRCS}
+target_include_directories(khcan_driver PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
 )
 
-add_executable(test_pfl28
-  main/test_pfl28.cpp
-  ${RMROBOT_COMMON_SRCS}
-)
-
-target_include_directories(show_status PRIVATE
-  include
-)
-
-target_include_directories(test_mit_mode PRIVATE
-  include
-)
-
-target_include_directories(test_pfl28 PRIVATE
-  include
-)
-
-target_link_libraries(show_status
+target_link_libraries(khcan_driver PUBLIC
   Threads::Threads
 )
 
-target_link_libraries(test_mit_mode
-  Threads::Threads
+foreach(tool show_status test_mit_mode)
+  add_executable(${tool}
+    main/${tool}.cpp
+  )
+  target_link_libraries(${tool}
+    khcan_driver
+  )
+  ament_target_dependencies(${tool}
+    ament_index_cpp
+  )
+endforeach()
+
+install(TARGETS khcan_driver
+  EXPORT export_khcan_driver
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin
+  INCLUDES DESTINATION include
 )
 
-target_link_libraries(test_pfl28
-  Threads::Threads
-)
-
-ament_target_dependencies(show_status
-  ament_index_cpp
-)
-
-ament_target_dependencies(test_mit_mode
-  ament_index_cpp
-)
-
-ament_target_dependencies(test_pfl28
-  ament_index_cpp
-)
-
-install(TARGETS show_status test_mit_mode test_pfl28
+install(TARGETS show_status test_mit_mode
   DESTINATION lib/${PROJECT_NAME}
 )
 
-if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/config)
-  install(DIRECTORY config/
-    DESTINATION share/${PROJECT_NAME}/config
-  )
-endif()
+install(DIRECTORY include/
+  DESTINATION include
+)
 
-if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/launch)
-  install(DIRECTORY launch/
-    DESTINATION share/${PROJECT_NAME}/launch
-  )
-endif()
+install(DIRECTORY config/
+  DESTINATION share/${PROJECT_NAME}/config
+)
+
+ament_export_targets(export_khcan_driver HAS_LIBRARY_TARGET)
+ament_export_include_directories(include)
+ament_export_libraries(khcan_driver)
+ament_export_dependencies(Threads)
 
 ament_package()
