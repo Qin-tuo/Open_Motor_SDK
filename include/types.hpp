@@ -50,6 +50,18 @@ struct Motor_CAN_Receive_Struct
     std::atomic<float> current_torque_f;
     std::atomic<float> current_temp_f;
     std::atomic<float> current_iq_f;
+    bool version_valid;
+    uint16_t boot_version;
+    uint16_t app_version;
+    uint16_t hw_version;
+    uint8_t can_proto_version;
+    bool haitai_mit_limits_valid;
+    float haitai_mit_pos_max_rad;
+    float haitai_mit_vel_max_rad_s;
+    float haitai_mit_torque_max_nm;
+    uint8_t haitai_mit_status;
+    bool haitai_mit_in_mode;
+    bool haitai_mit_fault;
 
     Motor_CAN_Receive_Struct()
     {
@@ -63,6 +75,18 @@ struct Motor_CAN_Receive_Struct
         current_torque_f = 0.0f;
         current_temp_f = 0.0f;
         current_iq_f = 0.0f;
+        version_valid = false;
+        boot_version = 0;
+        app_version = 0;
+        hw_version = 0;
+        can_proto_version = 0;
+        haitai_mit_limits_valid = false;
+        haitai_mit_pos_max_rad = 95.5f;
+        haitai_mit_vel_max_rad_s = 45.0f;
+        haitai_mit_torque_max_nm = 18.0f;
+        haitai_mit_status = 0;
+        haitai_mit_in_mode = false;
+        haitai_mit_fault = false;
     }
 
     Motor_CAN_Receive_Struct(const Motor_CAN_Receive_Struct &other)
@@ -77,6 +101,18 @@ struct Motor_CAN_Receive_Struct
         current_torque_f.store(other.current_torque_f.load());
         current_temp_f.store(other.current_temp_f.load());
         current_iq_f.store(other.current_iq_f.load());
+        version_valid = other.version_valid;
+        boot_version = other.boot_version;
+        app_version = other.app_version;
+        hw_version = other.hw_version;
+        can_proto_version = other.can_proto_version;
+        haitai_mit_limits_valid = other.haitai_mit_limits_valid;
+        haitai_mit_pos_max_rad = other.haitai_mit_pos_max_rad;
+        haitai_mit_vel_max_rad_s = other.haitai_mit_vel_max_rad_s;
+        haitai_mit_torque_max_nm = other.haitai_mit_torque_max_nm;
+        haitai_mit_status = other.haitai_mit_status;
+        haitai_mit_in_mode = other.haitai_mit_in_mode;
+        haitai_mit_fault = other.haitai_mit_fault;
     }
 
     Motor_CAN_Receive_Struct &operator=(const Motor_CAN_Receive_Struct &other)
@@ -93,6 +129,18 @@ struct Motor_CAN_Receive_Struct
             current_torque_f.store(other.current_torque_f.load());
             current_temp_f.store(other.current_temp_f.load());
             current_iq_f.store(other.current_iq_f.load());
+            version_valid = other.version_valid;
+            boot_version = other.boot_version;
+            app_version = other.app_version;
+            hw_version = other.hw_version;
+            can_proto_version = other.can_proto_version;
+            haitai_mit_limits_valid = other.haitai_mit_limits_valid;
+            haitai_mit_pos_max_rad = other.haitai_mit_pos_max_rad;
+            haitai_mit_vel_max_rad_s = other.haitai_mit_vel_max_rad_s;
+            haitai_mit_torque_max_nm = other.haitai_mit_torque_max_nm;
+            haitai_mit_status = other.haitai_mit_status;
+            haitai_mit_in_mode = other.haitai_mit_in_mode;
+            haitai_mit_fault = other.haitai_mit_fault;
         }
         return *this;
     }

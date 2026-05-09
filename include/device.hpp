@@ -1,6 +1,7 @@
 #pragma once
 
 #include "mapper.hpp"
+#include "haitai_protocol.hpp"
 #include "types.hpp"
 
 #include <atomic>
@@ -35,6 +36,7 @@ public:
     void SetZero(int& motor_index);
     void SetMode(int& motor_index, int mode);
     void QueryPos(int& motor_index);
+    void QueryVersion(int& motor_index);
 
     void ReceiveLoop();
 
@@ -104,4 +106,14 @@ private:
     void SetMode_Type6(int& motor_index, int mode);
     void SendCommand_Type6(int& motor_index);
     void QueryPos_Type6(int& motor_index);
+
+    // Type 7 (Haitai/海泰)
+    void EnableMotor_Type7(int& motor_index);
+    void DisableMotor_Type7(int& motor_index);
+    void ClearError_Type7(int& motor_index);
+    void SetZero_Type7(int& motor_index);
+    void SetMode_Type7(int& motor_index, int mode);
+    void SendCommand_Type7(int& motor_index);
+    void QueryPos_Type7(int& motor_index);
+    void QueryVersion_Type7(int& motor_index);
 };

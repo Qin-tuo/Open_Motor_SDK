@@ -1,6 +1,34 @@
 #include "config_loader.hpp"
 // 引入 toml++ 头文件 (你需要确保已经下载并放置在正确路径)
 
+#include <algorithm>
+#include <cctype>
+
+namespace {
+
+struct HaitaiModelDefaults {
+    float pos_max_rad;
+    float vel_max_rad_s;
+    float torque_max_nm;
+};
+
+std::string normalize_model_name(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::toupper(c));
+    });
+    return value;
+}
+
+HaitaiModelDefaults get_haitai_model_defaults(const std::string& type) {
+    const std::string key = normalize_model_name(type);
+    if (key == "HT3505-J8") return {95.5f, 32.04f, 0.85f};
+    if (key == "HT4310-J10") return {95.5f, 31.42f, 5.8f};
+    if (key == "HT6010-J6") return {95.5f, 70.16f, 9.0f};
+    return {95.5f, 45.0f, 18.0f};
+}
+
+}  // namespace
+
 // toml++ 不需要手动写 trim，也不需要 split，逻辑会大幅简化
 std::vector<Motor_CAN_Info_Struct> MotorConfigLoader::loadConfig(const std::string& filename) {
     std::vector<Motor_CAN_Info_Struct> motor_list;
@@ -113,8 +141,20 @@ std::vector<Motor_CAN_Info_Struct> MotorConfigLoader::loadConfig(const std::stri
             m.pos_min = 0.0f; m.pos_max = 9.5f;
         }
 
-        if (m.api_type == 5 || m.api_type == 6) {
-            // HighTorque/PFL28: allow compact config, most fields optional.
+        if (m.api_type == 7) {
+            // Haitai standard-frame protocol. Allow compact config like Type5/6.
+            const HaitaiModelDefaults defaults = get_haitai_model_defaults(m.type);
+            m.p_min = -defaults.pos_max_rad; m.p_max = defaults.pos_max_rad;
+            m.v_min = -defaults.vel_max_rad_s; m.v_max = defaults.vel_max_rad_s;
+            m.kp_min = 0.0f; m.kp_max = 500.0f;
+            m.kd_min = 0.0f; m.kd_max = 5.0f;
+            m.t_min = -defaults.torque_max_nm; m.t_max = defaults.torque_max_nm;
+            m.kp_in_use = 20.0f; m.kd_in_use = 0.8f;
+            m.pos_min = 0.0f; m.pos_max = 0.0f;
+        }
+
+        if (m.api_type == 5 || m.api_type == 6 || m.api_type == 7) {
+            // HighTorque/PFL28/Haitai: allow compact config, most fields optional.
             get_val(m.p_min, "p_min", false);
             get_val(m.p_max, "p_max", false);
             get_val(m.v_min, "v_min", false);

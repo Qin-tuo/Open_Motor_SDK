@@ -39,6 +39,10 @@ static const float LK_POS_SEND_FACTOR = 57.29578f * 100.0f;
 static const float C620_POS_TO_RAD = 6.28318530718f / 8191.0f;
 static const float C620_RPM_TO_RAD_S = 6.28318530718f / 60.0f;
 static const float TWO_PI = 6.28318530718f;
+static const float HAITAI_COUNT_TO_RAD = TWO_PI / 16384.0f;
+static const float HAITAI_MIT_DEFAULT_POS_MAX_RAD = 95.5f;
+static const float HAITAI_MIT_DEFAULT_VEL_MAX_RAD_S = 45.0f;
+static const float HAITAI_MIT_DEFAULT_TORQUE_MAX_NM = 18.0f;
 static const uint8_t HQ_MASTER_ID = 0;
 static const bool HQ_REPLY_REQUIRED = true;
 static const float HQ_POS_SCALE = 10000.0f;
@@ -504,6 +508,7 @@ void DeviceX::EnableMotor(int& motor_index) {
     else if (type == 4) EnableMotor_Type4(motor_index);
     else if (type == 5) EnableMotor_Type5(motor_index);
     else if (type == 6) EnableMotor_Type6(motor_index);
+    else if (type == 7) EnableMotor_Type7(motor_index);
 }
 
 void DeviceX::DisableMotor(int& motor_index) {
@@ -517,6 +522,7 @@ void DeviceX::DisableMotor(int& motor_index) {
     else if (type == 4) DisableMotor_Type4(motor_index);
     else if (type == 5) DisableMotor_Type5(motor_index);
     else if (type == 6) DisableMotor_Type6(motor_index);
+    else if (type == 7) DisableMotor_Type7(motor_index);
 }
 
 void DeviceX::ClearError(int& motor_index) {
@@ -530,6 +536,7 @@ void DeviceX::ClearError(int& motor_index) {
     else if (type == 4) ClearError_Type4(motor_index);
     else if (type == 5) ClearError_Type5(motor_index);
     else if (type == 6) ClearError_Type6(motor_index);
+    else if (type == 7) ClearError_Type7(motor_index);
 }
 
 void DeviceX::SetZero(int& motor_index) {
@@ -543,6 +550,7 @@ void DeviceX::SetZero(int& motor_index) {
     else if (type == 4) SetZero_Type4(motor_index);
     else if (type == 5) SetZero_Type5(motor_index);
     else if (type == 6) SetZero_Type6(motor_index);
+    else if (type == 7) SetZero_Type7(motor_index);
 }
 
 void DeviceX::SetMode(int& motor_index, int mode) {
@@ -556,6 +564,7 @@ void DeviceX::SetMode(int& motor_index, int mode) {
     else if (type == 4) SetMode_Type4(motor_index, mode);
     else if (type == 5) SetMode_Type5(motor_index, mode);
     else if (type == 6) SetMode_Type6(motor_index, mode);
+    else if (type == 7) SetMode_Type7(motor_index, mode);
 }
 
 void DeviceX::SendCommand(int& motor_index) {
@@ -572,6 +581,7 @@ void DeviceX::SendCommand(int& motor_index) {
     else if (type == 4) SendCommand_Type4(motor_index);
     else if (type == 5) SendCommand_Type5(motor_index);
     else if (type == 6) SendCommand_Type6(motor_index);
+    else if (type == 7) SendCommand_Type7(motor_index);
 }
 
 void DeviceX::QueryPos(int& motor_index) {
@@ -585,6 +595,14 @@ void DeviceX::QueryPos(int& motor_index) {
     else if (type == 4) QueryPos_Type4(motor_index);
     else if (type == 5) QueryPos_Type5(motor_index);
     else if (type == 6) QueryPos_Type6(motor_index);
+    else if (type == 7) QueryPos_Type7(motor_index);
+}
+
+void DeviceX::QueryVersion(int& motor_index) {
+    if (!p_motors_data || motor_index < 0 || motor_index >= (int)p_motors_data->size()) return;
+
+    int type = (*p_motors_data)[motor_index].info.api_type;
+    if (type == 7) QueryVersion_Type7(motor_index);
 }
 
 // =========================================================
@@ -1199,6 +1217,110 @@ void DeviceX::QueryPos_Type6(int& motor_index) {
 }
 
 // =========================================================
+//  Type 7 (Haitai/海泰)
+// =========================================================
+
+void DeviceX::EnableMotor_Type7(int& motor_index) {
+    const auto& info = (*p_motors_data)[motor_index].info;
+    const HaitaiCommandFrame status_frame = make_haitai_simple_query(0xAE, static_cast<uint32_t>(info.canid));
+    sendStandardFrame(status_frame.can_id, status_frame.data.data(), status_frame.dlc);
+
+    const HaitaiCommandFrame limits_frame = make_haitai_simple_query(0xF0, static_cast<uint32_t>(info.canid));
+    sendStandardFrame(limits_frame.can_id, limits_frame.data.data(), limits_frame.dlc);
+}
+
+void DeviceX::DisableMotor_Type7(int& motor_index) {
+    const auto& info = (*p_motors_data)[motor_index].info;
+    const HaitaiCommandFrame frame = make_haitai_simple_query(0xCF, static_cast<uint32_t>(info.canid));
+    sendStandardFrame(frame.can_id, frame.data.data(), frame.dlc);
+}
+
+void DeviceX::ClearError_Type7(int& motor_index) {
+    const auto& info = (*p_motors_data)[motor_index].info;
+    const HaitaiCommandFrame frame = make_haitai_simple_query(0xAF, static_cast<uint32_t>(info.canid));
+    sendStandardFrame(frame.can_id, frame.data.data(), frame.dlc);
+}
+
+void DeviceX::SetZero_Type7(int& motor_index) {
+    const auto& info = (*p_motors_data)[motor_index].info;
+    const HaitaiCommandFrame frame = make_haitai_simple_query(0xB1, static_cast<uint32_t>(info.canid));
+    sendStandardFrame(frame.can_id, frame.data.data(), frame.dlc);
+}
+
+void DeviceX::SetMode_Type7(int& motor_index, int mode) {
+    if (mode < 0) mode = 0;
+    if (mode > 4) mode = 4;
+    auto& motor = (*p_motors_data)[motor_index];
+    motor.send.mode = static_cast<uint8_t>(mode);
+
+    if (mode == 4) {
+        const auto& info = motor.info;
+        const float pos_max = (info.p_max > 0.0f) ? info.p_max : HAITAI_MIT_DEFAULT_POS_MAX_RAD;
+        const float vel_max = (info.v_max > 0.0f) ? info.v_max : HAITAI_MIT_DEFAULT_VEL_MAX_RAD_S;
+        const float torque_max = (info.t_max > 0.0f) ? info.t_max : HAITAI_MIT_DEFAULT_TORQUE_MAX_NM;
+
+        const HaitaiCommandFrame limits_frame = build_haitai_mit_limits_config(
+            pos_max,
+            vel_max,
+            torque_max,
+            static_cast<uint32_t>(info.canid));
+        sendStandardFrame(limits_frame.can_id, limits_frame.data.data(), limits_frame.dlc);
+
+        motor.recv.haitai_mit_limits_valid = true;
+        motor.recv.haitai_mit_pos_max_rad = pos_max;
+        motor.recv.haitai_mit_vel_max_rad_s = vel_max;
+        motor.recv.haitai_mit_torque_max_nm = torque_max;
+    }
+}
+
+void DeviceX::SendCommand_Type7(int& motor_index) {
+    const auto& motor = (*p_motors_data)[motor_index];
+    const auto& info = motor.info;
+    const auto& cmd = motor.send;
+
+    HaitaiCommandFrame frame {};
+    if (cmd.mode == 4) {
+        const auto& recv = motor.recv;
+        const float pos_max = recv.haitai_mit_limits_valid ? recv.haitai_mit_pos_max_rad :
+            ((info.p_max > 0.0f) ? info.p_max : HAITAI_MIT_DEFAULT_POS_MAX_RAD);
+        const float vel_max = recv.haitai_mit_limits_valid ? recv.haitai_mit_vel_max_rad_s :
+            ((info.v_max > 0.0f) ? info.v_max : HAITAI_MIT_DEFAULT_VEL_MAX_RAD_S);
+        const float torque_max = recv.haitai_mit_limits_valid ? recv.haitai_mit_torque_max_nm :
+            ((info.t_max > 0.0f) ? info.t_max : HAITAI_MIT_DEFAULT_TORQUE_MAX_NM);
+        frame = build_haitai_mit_command(
+            cmd.position,
+            cmd.speed,
+            cmd.kp,
+            cmd.kd,
+            cmd.torque,
+            pos_max,
+            vel_max,
+            torque_max,
+            static_cast<uint32_t>(info.canid));
+    } else {
+        frame = build_haitai_command(
+            cmd.mode,
+            cmd.position,
+            cmd.speed,
+            cmd.torque,
+            static_cast<uint32_t>(info.canid));
+    }
+    sendStandardFrame(frame.can_id, frame.data.data(), frame.dlc);
+}
+
+void DeviceX::QueryPos_Type7(int& motor_index) {
+    const auto& info = (*p_motors_data)[motor_index].info;
+    const HaitaiCommandFrame frame = make_haitai_simple_query(0xA4, static_cast<uint32_t>(info.canid));
+    sendStandardFrame(frame.can_id, frame.data.data(), frame.dlc);
+}
+
+void DeviceX::QueryVersion_Type7(int& motor_index) {
+    const auto& info = (*p_motors_data)[motor_index].info;
+    const HaitaiCommandFrame frame = make_haitai_simple_query(0xA0, static_cast<uint32_t>(info.canid));
+    sendStandardFrame(frame.can_id, frame.data.data(), frame.dlc);
+}
+
+// =========================================================
 //  Receive Loop
 // =========================================================
 
@@ -1259,10 +1381,13 @@ void DeviceX::ReceiveLoop() {
                 parsed_motor_id = canID - 0x140;
             } else if (canID >= 0x180 && canID < 0x1A0) {
                 parsed_motor_id = canID - 0x180;
+            } else if ((canID & 0x400U) != 0 && (canID & 0xFFU) > 0) {
+                // Haitai MIT frames set standard ID bit 10: 0x400 | device address.
+                parsed_motor_id = static_cast<int>(canID & 0xFFU);
             } else if (canID >= 0x201 && canID <= 0x208) {
                 parsed_motor_id = canID - 0x200;
-            } else if (canID > 0 && canID <= 0x7F) {
-                // PFL28/L28 P2P frames: CAN ID is node id.
+            } else if (canID > 0 && canID <= 0xFF) {
+                // PFL28/L28 and Haitai standard frames: CAN ID is node id/device address.
                 parsed_motor_id = static_cast<int>(canID);
             } else if ((((canID >> 8) & 0x7F) > 0) && ((canID & 0x7F) == 0 || (canID & 0x7F) == 0x7F)) {
                 // HighTorque reply id format: [src(7bit)][dst(7bit)].
@@ -1399,6 +1524,92 @@ void DeviceX::ReceiveLoop() {
             motor.recv.mode = frame.data[0];
             motor.recv.motor_state = 2; // compact status/error frame
             motor.recv.fault_message = frame.data[3];
+        } else if (motor.info.api_type == 7 && !(frame.can_id & CAN_EFF_FLAG)) {
+            std::array<uint8_t, 8> raw {};
+            std::memcpy(raw.data(), frame.data, std::min<std::size_t>(frame_len, raw.size()));
+
+            HaitaiFeedback feedback {};
+            const float mit_pos_max = motor.recv.haitai_mit_limits_valid ?
+                motor.recv.haitai_mit_pos_max_rad : HAITAI_MIT_DEFAULT_POS_MAX_RAD;
+            const float mit_vel_max = motor.recv.haitai_mit_limits_valid ?
+                motor.recv.haitai_mit_vel_max_rad_s : HAITAI_MIT_DEFAULT_VEL_MAX_RAD_S;
+            const float mit_torque_max = motor.recv.haitai_mit_limits_valid ?
+                motor.recv.haitai_mit_torque_max_nm : HAITAI_MIT_DEFAULT_TORQUE_MAX_NM;
+            if (!parse_haitai_feedback(canID, raw, frame_len, feedback,
+                                       mit_pos_max, mit_vel_max, mit_torque_max)) {
+                continue;
+            }
+
+            if (feedback.has_position) {
+                motor.recv.current_position_f.store(feedback.position_rad);
+            }
+            if (feedback.has_speed) {
+                motor.recv.current_speed_f.store(feedback.speed_rad_s);
+            }
+            if (feedback.has_current) {
+                motor.recv.current_iq_f.store(feedback.current_a);
+                motor.recv.current_torque_f.store(feedback.current_a);
+            }
+            if (feedback.has_torque) {
+                motor.recv.current_torque_f.store(feedback.torque_nm);
+            }
+            if (feedback.has_temperature) {
+                motor.recv.current_temp_f.store(feedback.temperature_c);
+            }
+            if (feedback.has_version) {
+                motor.recv.version_valid = true;
+                motor.recv.boot_version = feedback.boot_version;
+                motor.recv.app_version = feedback.app_version;
+                motor.recv.hw_version = feedback.hw_version;
+                motor.recv.can_proto_version = feedback.can_proto_version;
+            }
+            if (feedback.has_mit_limits) {
+                motor.recv.haitai_mit_limits_valid = true;
+                motor.recv.haitai_mit_pos_max_rad = feedback.mit_pos_max_rad;
+                motor.recv.haitai_mit_vel_max_rad_s = feedback.mit_vel_max_rad_s;
+                motor.recv.haitai_mit_torque_max_nm = feedback.mit_torque_max_nm;
+            }
+            if (feedback.has_mit_state) {
+                motor.recv.haitai_mit_status = feedback.mit_status;
+                motor.recv.haitai_mit_in_mode = feedback.mit_in_mode;
+                motor.recv.haitai_mit_fault = feedback.mit_fault;
+                motor.recv.mode = 4;
+                motor.recv.fault_message = feedback.fault;
+                motor.recv.motor_state = 1;
+            }
+            if (feedback.has_status) {
+                motor.recv.mode = feedback.mode;
+                motor.recv.fault_message = feedback.fault;
+                motor.recv.motor_state = 1;
+            }
+
+            if ((feedback.command == 0xA3 || feedback.command == 0xC2 ||
+                 feedback.command == 0xC3 || feedback.command == 0xC4) &&
+                frame_len >= 7) {
+                const uint16_t angle_single = static_cast<uint16_t>(frame.data[1]) |
+                                              (static_cast<uint16_t>(frame.data[2]) << 8);
+                motor.recv.motor_state = 1;
+                motor.recv.mode = motor.send.mode;
+                if (std::fabs(motor.recv.current_position_f.load()) < 1e-6f) {
+                    motor.recv.current_position_f.store(static_cast<float>(angle_single) * HAITAI_COUNT_TO_RAD);
+                }
+            } else if ((feedback.command == 0xA1 || feedback.command == 0xC0 ||
+                        feedback.command == 0xA2 || feedback.command == 0xC1)) {
+                motor.recv.mode = motor.send.mode;
+                motor.recv.motor_state = 1;
+            } else if (feedback.command == 0xA4) {
+                motor.recv.mode = motor.send.mode;
+                motor.recv.motor_state = 1;
+            } else if (feedback.command == 0xA0) {
+                motor.recv.motor_state = 1;
+            } else if (feedback.command == 0xAF) {
+                motor.recv.fault_message = feedback.fault;
+                motor.recv.motor_state = 1;
+            } else if (feedback.command == 0xF0) {
+                motor.recv.motor_state = 1;
+            }
+
+            motor.recv.motor_id = static_cast<uint8_t>(parsed_motor_id);
         } else if (motor.info.api_type == 5) {
             if (frame_len < 2) continue;
             const HQTypeAdapt adapt = get_hq_type_adapt(motor.info.type);

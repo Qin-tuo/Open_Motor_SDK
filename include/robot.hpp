@@ -48,6 +48,7 @@ public:
 
     void QueryPos_ALL();
     void QueryPos_N(int N);
+    void QueryVersion_N(int N);
 
     void PrintStatus();
     std::vector<float> GetPosAll();

@@ -1,3 +1,3 @@
 motors = [
-  { num = 11, name = "R_PUSHROD", type = "PFL28", api_type = 6, chan = 6, canid = 7, p_min = 0.0, p_max = 9.5, t_min = 0.0, t_max = 2.5, pos_min = 0.0, pos_max = 9.5},
+  { num = 21, name = "R_HT_1", type = "HT3505-J8", api_type = 7, chan = 1, canid = 1, pos_min = -6.28, pos_max = 6.28},
 ]

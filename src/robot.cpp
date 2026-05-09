@@ -334,3 +334,17 @@ void BaseRobot::QueryPos_ALL() {
         }
     }
 }
+
+void BaseRobot::QueryVersion_N(int N) {
+    if (!valid_motor_index(global_motors, N)) {
+        std::cerr << "[Error] QueryVersion_N: motor index " << N << " out of range." << std::endl;
+        return;
+    }
+
+    const int dev_idx = global_motors[N].info.device_index;
+    if (valid_device_index(devices, dev_idx)) {
+        devices[dev_idx]->QueryVersion(N);
+    } else {
+        std::cerr << "[Error] QueryVersion_N: device not found for motor " << N << std::endl;
+    }
+}

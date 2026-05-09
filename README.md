@@ -9,6 +9,7 @@
 当前仓库中可用的入口程序有：
 - `show_status`：从 `config/motor.toml` 读取配置，初始化并周期性查询所有电机状态
 - `test_mit_mode`：根据 `api_type` 自动切换到 MIT 模式（Type1/2/3/5），对单个电机执行正弦摆动测试
+- `test_haitai_mode`：自动选择第一个海泰电机，使用绝对位置模式执行正弦摆动测试
 
 ## 当前目录结构
 ```text
@@ -20,6 +21,7 @@ khcan/
 ├── include/
 ├── main/
 │   ├── show_status.cpp
+│   ├── test_haitai_mode.cpp
 │   └── test_mit_mode.cpp
 └── src/
 ```
@@ -27,6 +29,7 @@ khcan/
 ## 代码框架对应关系
 - `main/show_status.cpp`：程序入口，执行初始化、清错、使能和状态打印循环
 - `main/test_mit_mode.cpp`：通用 MIT 测试入口，自动适配 Type1/2/3/5 的 MIT 模式编号
+- `main/test_haitai_mode.cpp`：海泰 Type7 绝对位置测试入口
 - `config/motor.toml`：电机编号、类型、CAN 通道、CAN ID 与控制参数配置
 - `src/config_loader.cpp`：加载 TOML 配置
 - `src/device.cpp`：SocketCAN 设备收发、接口打开与状态检查
@@ -152,8 +155,8 @@ config/motor.toml
 |---|---|---|---|
 | `num` | 逻辑编号（业务编号） | 整数 | 否（仅上层标识） |
 | `name` | 电机名称（便于日志识别） | 字符串 | 否 |
-| `type` | 电机型号名（如 `LZRS06`、`M4438_30`、`PFL28`） | 字符串 | Type5 下会参与力矩/增益缩放 |
-| `api_type` | 协议类型编号 | `1/2/3/4/5/6` | 是（决定走哪套协议） |
+| `type` | 电机型号名（如 `LZRS06`、`M4438_30`、`PFL28`、`HT3505-J8`） | 字符串 | Type5 下会参与力矩/增益缩放；Type7 下用于海泰 MIT 默认限幅 |
+| `api_type` | 协议类型编号 | `1/2/3/4/5/6/7` | 是（决定走哪套协议） |
 | `chan` | CAN 通道号 | 正整数，如 `1` | 间接（映射接口名） |
 | `canid` | 电机 CAN ID | 通常 `1~255`（按驱动手册） | 是 |
 | `p_min` | 位置映射最小值 | 通常 rad | 是 |
@@ -178,9 +181,10 @@ config/motor.toml
 - `4`：Type4（RoboMaster C620 协议）
 - `5`：Type5（高擎 16-bit ID 协议）
 - `6`：Type6（AgiBot PFL28/L28，`pos(float)+current(float)`）
+- `7`：Type7（海泰标准帧协议）
 
 ### 驱动能力确认
-当前清理只删除了独立测试/排障入口，不影响底层电机驱动能力。`DeviceX` 仍保留 Type1~Type6 的使能、失能、清错、设零、设模式、发送命令和查询位置分发；`ReceiveLoop()` 仍保留对应反馈解析路径。
+当前清理只删除了独立测试/排障入口，不影响底层电机驱动能力。`DeviceX` 仍保留 Type1~Type7 的使能、失能、清错、设零、设模式、发送命令和查询位置分发；`ReceiveLoop()` 仍保留对应反馈解析路径。
 
 | `api_type` | 驱动能力 | 当前诊断入口 |
 |---|---|---|
@@ -190,6 +194,7 @@ config/motor.toml
 | `4` | 保留 Type4 / C620 协议发送与反馈解析 | 可通过 `show_status` 查看状态 |
 | `5` | 保留 Type5 / 高擎 CAN FD 协议发送与反馈解析 | `test_mit_mode` 可用于 MIT 模式简单验证 |
 | `6` | 保留 Type6 / PFL28 协议发送与反馈解析 | 独立 PFL28 诊断入口已删除，请通过库 API 控制 |
+| `7` | 保留 Type7 / 海泰 Rev.3.07b0 标准 CAN 协议发送与反馈解析，含绝对位置和 MIT 模式 | 可通过 `show_status` / `test_haitai_mode` 查看状态 |
 
 也就是说，其他类型电机仍通过 `BaseRobot::Move_N()` / `BaseRobot::Move()` 进入统一发送路径，按各自 `api_type` 分发到对应 `SendCommand_TypeX()`。
 
@@ -201,6 +206,8 @@ config/motor.toml
   - MIT 模式的 `kp/kd` 也会做型号补偿
   - 若 `type` 未匹配已知型号，则回退为 `k=1.0,d=0.0`（等价无补偿）
 - `api_type=6`（PFL28）默认将 `send.position` 作为位置命令、`send.torque` 作为电流命令（A）。
+- `api_type=7`（海泰 Rev.3.07b0）默认将 `send.mode=0` 映射为 `0xC2` 绝对位置控制；`SetMode_N()` 支持 `0` 绝对位置、`1` 电流、`2` 速度、`3` 相对位置、`4` MIT 模式。海泰 `QueryPos` 使用 `0xA4` 复合状态查询，能同时回读位置、速度、电流和温度；使能时会额外查询 `0xF0` MIT 限幅，未收到限幅前按协议默认 `95.5rad / 45rad/s / 18Nm` 发送 MIT 帧。
+- Type7 海泰可在 `type` 中填写具体型号并自动使用 MIT 默认限幅：`HT3505-J8` 为 `95.5rad / 32.04rad/s / 0.85Nm`，`HT4310-J10` 为 `95.5rad / 31.42rad/s / 5.8Nm`，`HT6010-J6` 为 `95.5rad / 70.16rad/s / 9.0Nm`。未知型号回退到协议默认 `95.5rad / 45rad/s / 18Nm`；TOML 中显式填写的 `p/v/t/kp/kd` 字段始终优先覆盖内置默认值。进入 `mode=4` 时驱动会用当前配置通过 `0xF0` 同步 MIT 限幅到驱动板。
 - `p/v/t/kp/kd` 的 `min/max` 既用于发送映射，也用于接收反解（不同 `api_type` 有差异，但都依赖这些边界）。
 - `kp_in_use`、`kd_in_use` 会在初始化时拷贝到每个电机的发送缓存，后续可再通过接口动态修改。
 - `pos_min`、`pos_max` 用于 `Move/Move_N` 的发送前限幅；若 `pos_min >= pos_max`，限幅逻辑会被跳过（等价于不启用软限位）。
@@ -216,6 +223,8 @@ Type5 当前内置的常见型号系数：`M3536_32`、`M4438_30`、`M4438_32`�
 
 PFL28（位置+电流控制）：{num = 11, name = "R_PUSHROD", type = "PFL28", api_type = 6, chan = 0, canid = 1, p_min = 0.0, p_max = 9.5, t_min = 0.0, t_max = 2.5, pos_min = 0.0, pos_max = 9.5}
 
+海泰（按具体型号加载 MIT 默认限幅）：{num = 21, name = "R_HT_1", type = "HT3505-J8", api_type = 7, chan = 1, canid = 1, pos_min = -6.28, pos_max = 6.28}
+
 ## 编译
 建议在工作区根目录执行：
 ```bash
@@ -229,6 +238,7 @@ source install/setup.bash
 - `share/khcan/config/motor.toml`：默认配置文件
 - `ros2 run khcan show_status`
 - `ros2 run khcan test_mit_mode`
+- `ros2 run khcan test_haitai_mode`
 
 ### 作为驱动库植入其他工程
 在下游 ROS 2 包中可直接 `find_package(khcan)` 并链接导出的 CMake target：
@@ -275,6 +285,7 @@ source install/setup.bash
 ```bash
 ros2 run khcan show_status
 ros2 run khcan test_mit_mode
+ros2 run khcan test_haitai_mode
 ```
 
 PFL28 独立排障入口已删除。Type6/PFL28 驱动仍保留在库中，业务代码请通过 `BaseRobot` 直接发送位置/电流命令。
