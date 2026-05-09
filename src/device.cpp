@@ -36,8 +36,6 @@ static const float LK_CURRENT_SEND_FACTOR = 100.0f;
 static const float LK_SPEED_SEND_FACTOR = 57.29578f * 100.0f;
 static const float LK_POS_SEND_FACTOR = 57.29578f * 100.0f;
 
-static const float C620_POS_TO_RAD = 6.28318530718f / 8191.0f;
-static const float C620_RPM_TO_RAD_S = 6.28318530718f / 60.0f;
 static const float TWO_PI = 6.28318530718f;
 static const float HAITAI_COUNT_TO_RAD = TWO_PI / 16384.0f;
 static const float HAITAI_MIT_DEFAULT_POS_MAX_RAD = 95.5f;
@@ -505,7 +503,6 @@ void DeviceX::EnableMotor(int& motor_index) {
     if (type == 1) EnableMotor_Type1(motor_index);
     else if (type == 2) EnableMotor_Type2(motor_index);
     else if (type == 3) EnableMotor_Type3(motor_index);
-    else if (type == 4) EnableMotor_Type4(motor_index);
     else if (type == 5) EnableMotor_Type5(motor_index);
     else if (type == 6) EnableMotor_Type6(motor_index);
     else if (type == 7) EnableMotor_Type7(motor_index);
@@ -519,7 +516,6 @@ void DeviceX::DisableMotor(int& motor_index) {
     if (type == 1) DisableMotor_Type1(motor_index);
     else if (type == 2) DisableMotor_Type2(motor_index);
     else if (type == 3) DisableMotor_Type3(motor_index);
-    else if (type == 4) DisableMotor_Type4(motor_index);
     else if (type == 5) DisableMotor_Type5(motor_index);
     else if (type == 6) DisableMotor_Type6(motor_index);
     else if (type == 7) DisableMotor_Type7(motor_index);
@@ -533,7 +529,6 @@ void DeviceX::ClearError(int& motor_index) {
     if (type == 1) ClearError_Type1(motor_index);
     else if (type == 2) ClearError_Type2(motor_index);
     else if (type == 3) ClearError_Type3(motor_index);
-    else if (type == 4) ClearError_Type4(motor_index);
     else if (type == 5) ClearError_Type5(motor_index);
     else if (type == 6) ClearError_Type6(motor_index);
     else if (type == 7) ClearError_Type7(motor_index);
@@ -547,7 +542,6 @@ void DeviceX::SetZero(int& motor_index) {
     if (type == 1) SetZero_Type1(motor_index);
     else if (type == 2) SetZero_Type2(motor_index);
     else if (type == 3) SetZero_Type3(motor_index);
-    else if (type == 4) SetZero_Type4(motor_index);
     else if (type == 5) SetZero_Type5(motor_index);
     else if (type == 6) SetZero_Type6(motor_index);
     else if (type == 7) SetZero_Type7(motor_index);
@@ -561,7 +555,6 @@ void DeviceX::SetMode(int& motor_index, int mode) {
     if (type == 1) SetMode_Type1(motor_index, mode);
     else if (type == 2) SetMode_Type2(motor_index, mode);
     else if (type == 3) SetMode_Type3(motor_index, mode);
-    else if (type == 4) SetMode_Type4(motor_index, mode);
     else if (type == 5) SetMode_Type5(motor_index, mode);
     else if (type == 6) SetMode_Type6(motor_index, mode);
     else if (type == 7) SetMode_Type7(motor_index, mode);
@@ -578,7 +571,6 @@ void DeviceX::SendCommand(int& motor_index) {
     if (type == 1) SendCommand_Type1(motor_index);
     else if (type == 2) SendCommand_Type2(motor_index);
     else if (type == 3) SendCommand_Type3(motor_index);
-    else if (type == 4) SendCommand_Type4(motor_index);
     else if (type == 5) SendCommand_Type5(motor_index);
     else if (type == 6) SendCommand_Type6(motor_index);
     else if (type == 7) SendCommand_Type7(motor_index);
@@ -592,7 +584,6 @@ void DeviceX::QueryPos(int& motor_index) {
     if (type == 1) QueryPos_Type1(motor_index);
     else if (type == 2) QueryPos_Type2(motor_index);
     else if (type == 3) QueryPos_Type3(motor_index);
-    else if (type == 4) QueryPos_Type4(motor_index);
     else if (type == 5) QueryPos_Type5(motor_index);
     else if (type == 6) QueryPos_Type6(motor_index);
     else if (type == 7) QueryPos_Type7(motor_index);
@@ -891,80 +882,6 @@ void DeviceX::QueryPos_Type3(int& motor_index) {
     data[2] = 0xCC;
 
     sendStandardFrame(0x7FF, data);
-}
-
-// =========================================================
-//  Type 4 (RoboMaster C620)
-// =========================================================
-
-void DeviceX::EnableMotor_Type4(int& motor_index) {
-    (*p_motors_data)[motor_index].send.mode = 0;
-}
-
-void DeviceX::DisableMotor_Type4(int& motor_index) {
-    const auto& motor = (*p_motors_data)[motor_index];
-    const int id = motor.info.canid;
-    if (id < 1 || id > 8) return;
-
-    uint32_t base_id = (id <= 4) ? 0x200 : 0x1FF;
-    uint8_t data[8] = {0};
-    sendStandardFrame(base_id, data);
-}
-
-void DeviceX::ClearError_Type4(int& motor_index) {
-    (void)motor_index;
-}
-
-void DeviceX::SetZero_Type4(int& motor_index) {
-    (void)motor_index;
-}
-
-void DeviceX::SetMode_Type4(int& motor_index, int mode) {
-    (*p_motors_data)[motor_index].send.mode = static_cast<uint8_t>(mode);
-}
-
-void DeviceX::SendCommand_Type4(int& motor_index) {
-    const auto& motor = (*p_motors_data)[motor_index];
-    const int id = motor.info.canid;
-    if (id < 1 || id > 8) return;
-
-    const uint32_t base_id = (id <= 4) ? 0x200 : 0x1FF;
-
-    uint8_t data[8] = {0};
-
-    for (const auto& m : *p_motors_data) {
-        if (m.info.api_type != 4) continue;
-        if (m.info.device_index != motor.info.device_index) continue;
-        if (m.info.chan != motor.info.chan) continue;
-
-        const int canid = m.info.canid;
-        if (canid < 1 || canid > 8) continue;
-        if ((base_id == 0x200 && canid > 4) || (base_id == 0x1FF && canid < 5)) continue;
-
-        float torque_cmd = m.send.torque;
-        int16_t iq_cmd = 0;
-
-        if (m.info.t_max > m.info.t_min) {
-            const float clipped = std::max(m.info.t_min, std::min(m.info.t_max, torque_cmd));
-            const float ratio = (clipped - m.info.t_min) / (m.info.t_max - m.info.t_min);
-            float raw = ratio * (16384.0f - (-16384.0f)) + (-16384.0f);
-            raw = std::max(-16384.0f, std::min(16384.0f, raw));
-            iq_cmd = (int16_t)std::lround(raw);
-        } else {
-            float raw = std::max(-16384.0f, std::min(16384.0f, torque_cmd));
-            iq_cmd = (int16_t)std::lround(raw);
-        }
-
-        const int slot = (base_id == 0x200) ? (canid - 1) : (canid - 5);
-        data[slot * 2 + 0] = (uint8_t)((iq_cmd >> 8) & 0xFF);
-        data[slot * 2 + 1] = (uint8_t)(iq_cmd & 0xFF);
-    }
-
-    sendStandardFrame(base_id, data);
-}
-
-void DeviceX::QueryPos_Type4(int& motor_index) {
-    (void)motor_index;
 }
 
 // =========================================================
@@ -1478,27 +1395,6 @@ void DeviceX::ReceiveLoop() {
 
             motor.recv.motor_id = motor_id;
             motor.recv.fault_message = err;
-        } else if (motor.info.api_type == 4 && frame_len >= 7) {
-            uint16_t pos_raw = (uint16_t)((frame.data[0] << 8) | frame.data[1]);
-            int16_t spd_rpm = (int16_t)((frame.data[2] << 8) | frame.data[3]);
-            int16_t iq_raw = (int16_t)((frame.data[4] << 8) | frame.data[5]);
-            uint8_t temp = frame.data[6];
-
-            motor.recv.current_position_f.store((float)pos_raw * C620_POS_TO_RAD);
-            motor.recv.current_speed_f.store((float)spd_rpm * C620_RPM_TO_RAD_S);
-            motor.recv.current_iq_f.store((float)iq_raw * (20.0f / 16384.0f));
-
-            if (motor.info.t_max > motor.info.t_min) {
-                float torque = ((float)iq_raw - (-16384.0f)) / (16384.0f - (-16384.0f));
-                torque = torque * (motor.info.t_max - motor.info.t_min) + motor.info.t_min;
-                motor.recv.current_torque_f.store(torque);
-            } else {
-                motor.recv.current_torque_f.store((float)iq_raw);
-            }
-
-            motor.recv.current_temp_f.store((float)temp);
-            motor.recv.motor_id = (uint8_t)parsed_motor_id;
-            motor.recv.fault_message = 0;
         } else if (motor.info.api_type == 6 && !(frame.can_id & CAN_EFF_FLAG) && frame_len >= 8) {
             float pos_feedback = 0.0f;
             float cur_feedback = 0.0f;

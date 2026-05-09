@@ -2,6 +2,7 @@
 
 #include "config_loader.hpp"
 #include "device.hpp"
+#include "feetech_servo_device.hpp"
 #include "mapper.hpp"
 #include "types.hpp"
 
@@ -56,6 +57,7 @@ public:
 
     std::vector<Motor_CAN_Struct> global_motors;
     std::vector<DeviceX*> devices;
+    std::vector<FeetechServoDevice*> feetech_devices;
     TopoMapper mapper;
     std::map<std::string, int> device_name_map_idx;
 };

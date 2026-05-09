@@ -156,6 +156,8 @@ typedef struct
     int device_index;
     int chan;
     int canid;
+    std::string port;
+    int baud;
 
     float p_min, p_max;
     float v_min, v_max;

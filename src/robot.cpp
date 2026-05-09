@@ -16,6 +16,10 @@ bool valid_device_index(const std::vector<DeviceX*>& devices, int idx) {
     return idx >= 0 && static_cast<std::size_t>(idx) < devices.size() && devices[idx] != nullptr;
 }
 
+bool valid_feetech_index(const std::vector<FeetechServoDevice*>& devices, int idx) {
+    return idx >= 0 && static_cast<std::size_t>(idx) < devices.size() && devices[idx] != nullptr;
+}
+
 }  // namespace
 
 BaseRobot::BaseRobot(const std::string& config_file) {
@@ -58,6 +62,7 @@ BaseRobot::BaseRobot(const std::string& config_file) {
                         topo_matrix);
 
     devices.resize(static_cast<std::size_t>(device_counter), nullptr);
+    feetech_devices.resize(static_cast<std::size_t>(device_counter), nullptr);
     std::vector<int> device_api_types(static_cast<std::size_t>(device_counter), -1);
 
     for (std::size_t i = 0; i < global_motors.size(); ++i) {
@@ -74,6 +79,24 @@ BaseRobot::BaseRobot(const std::string& config_file) {
             std::cerr << "[Warn] Mixed api_type on " << motor.info.device_name
                       << ": first=" << device_api_types[dev_idx]
                       << ", current=" << motor.info.api_type << std::endl;
+        }
+
+        if (motor.info.api_type == 4) {
+            if (feetech_devices[dev_idx] == nullptr) {
+                std::cout << "[Init] Creating Feetech Servo Driver for " << motor.info.device_name
+                          << " | API Type: " << motor.info.api_type
+                          << " | Baud: " << motor.info.baud << std::endl;
+                feetech_devices[dev_idx] = new FeetechServoDevice();
+                if (!feetech_devices[dev_idx]->Init(motor.info.device_name,
+                                                    motor.info.baud,
+                                                    dev_idx,
+                                                    &global_motors,
+                                                    &mapper)) {
+                    delete feetech_devices[dev_idx];
+                    feetech_devices[dev_idx] = nullptr;
+                }
+            }
+            continue;
         }
 
         if (devices[dev_idx] == nullptr) {
@@ -93,6 +116,10 @@ BaseRobot::~BaseRobot() {
     }
 
     for (auto* device : devices) {
+        delete device;
+    }
+
+    for (auto* device : feetech_devices) {
         delete device;
     }
 }
@@ -139,6 +166,15 @@ void BaseRobot::Enable_N(int N) {
     }
 
     const int dev_idx = global_motors[N].info.device_index;
+    if (global_motors[N].info.api_type == 4) {
+        if (!valid_feetech_index(feetech_devices, dev_idx)) {
+            std::cerr << "[Error] Enable_N: Feetech device not found for motor " << N << std::endl;
+            return;
+        }
+        feetech_devices[dev_idx]->EnableMotor(N);
+        return;
+    }
+
     if (!valid_device_index(devices, dev_idx)) {
         std::cerr << "[Error] Enable_N: device not found for motor " << N << std::endl;
         return;
@@ -151,6 +187,13 @@ void BaseRobot::Disable_N(int N) {
     if (!valid_motor_index(global_motors, N)) return;
 
     const int dev_idx = global_motors[N].info.device_index;
+    if (global_motors[N].info.api_type == 4) {
+        if (valid_feetech_index(feetech_devices, dev_idx)) {
+            feetech_devices[dev_idx]->DisableMotor(N);
+        }
+        return;
+    }
+
     if (valid_device_index(devices, dev_idx)) {
         devices[dev_idx]->DisableMotor(N);
     }
@@ -163,6 +206,17 @@ void BaseRobot::ClearError_N(int N) {
     }
 
     const int dev_idx = global_motors[N].info.device_index;
+    if (global_motors[N].info.api_type == 4) {
+        if (!valid_feetech_index(feetech_devices, dev_idx)) {
+            std::cerr << "[Error] ClearError_N: Feetech device not found for motor " << N << std::endl;
+            return;
+        }
+        feetech_devices[dev_idx]->ClearError(N);
+        std::cout << "[Info] Clear Error sent to Motor index: " << N
+                  << " (" << global_motors[N].info.name << ")" << std::endl;
+        return;
+    }
+
     if (!valid_device_index(devices, dev_idx)) {
         std::cerr << "[Error] ClearError_N: device not found for motor " << N << std::endl;
         return;
@@ -180,6 +234,17 @@ void BaseRobot::SetZero_N(int N) {
     }
 
     const int dev_idx = global_motors[N].info.device_index;
+    if (global_motors[N].info.api_type == 4) {
+        if (!valid_feetech_index(feetech_devices, dev_idx)) {
+            std::cerr << "[Error] SetZero_N: Feetech device not found for motor " << N << std::endl;
+            return;
+        }
+        feetech_devices[dev_idx]->SetZero(N);
+        std::cout << "[Info] Set Zero sent to Motor index: " << N
+                  << " (" << global_motors[N].info.name << ")" << std::endl;
+        return;
+    }
+
     if (!valid_device_index(devices, dev_idx)) {
         std::cerr << "[Error] SetZero_N: device not found for motor " << N << std::endl;
         return;
@@ -213,6 +278,15 @@ void BaseRobot::SetMode_N(int N, int mode) {
     }
 
     const int dev_idx = global_motors[N].info.device_index;
+    if (global_motors[N].info.api_type == 4) {
+        if (valid_feetech_index(feetech_devices, dev_idx)) {
+            feetech_devices[dev_idx]->SetMode(N, mode);
+        } else {
+            std::cerr << "[Error] SetMode_N: Feetech device not found for motor " << N << std::endl;
+        }
+        return;
+    }
+
     if (valid_device_index(devices, dev_idx)) {
         devices[dev_idx]->SetMode(N, mode);
     } else {
@@ -247,6 +321,13 @@ void BaseRobot::Move_N(int N, const MotorCmdVec& target) {
     motor.send.torque = target.t;
 
     const int dev_idx = motor.info.device_index;
+    if (motor.info.api_type == 4) {
+        if (valid_feetech_index(feetech_devices, dev_idx)) {
+            feetech_devices[dev_idx]->SendCommand(N);
+        }
+        return;
+    }
+
     if (valid_device_index(devices, dev_idx)) {
         devices[dev_idx]->SendCommand(N);
     }
@@ -262,6 +343,15 @@ void BaseRobot::Move(const std::vector<MotorCmdVec>& targets) {
         motor.send.torque = cmd.t;
 
         const int dev_idx = motor.info.device_index;
+        if (motor.info.api_type == 4) {
+            if (valid_feetech_index(feetech_devices, dev_idx)) {
+                int idx = static_cast<int>(i);
+                feetech_devices[dev_idx]->SendCommand(idx);
+            }
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
+            continue;
+        }
+
         if (valid_device_index(devices, dev_idx)) {
             int idx = static_cast<int>(i);
             devices[dev_idx]->SendCommand(idx);
@@ -317,6 +407,15 @@ void BaseRobot::QueryPos_N(int N) {
     }
 
     const int dev_idx = global_motors[N].info.device_index;
+    if (global_motors[N].info.api_type == 4) {
+        if (valid_feetech_index(feetech_devices, dev_idx)) {
+            feetech_devices[dev_idx]->QueryPos(N);
+        } else {
+            std::cerr << "[Error] QueryPos_N: Feetech device not found for motor " << N << std::endl;
+        }
+        return;
+    }
+
     if (valid_device_index(devices, dev_idx)) {
         devices[dev_idx]->QueryPos(N);
     } else {
@@ -327,6 +426,15 @@ void BaseRobot::QueryPos_N(int N) {
 void BaseRobot::QueryPos_ALL() {
     for (std::size_t i = 0; i < global_motors.size(); ++i) {
         const int dev_idx = global_motors[i].info.device_index;
+        if (global_motors[i].info.api_type == 4) {
+            if (valid_feetech_index(feetech_devices, dev_idx)) {
+                int idx = static_cast<int>(i);
+                feetech_devices[dev_idx]->QueryPos(idx);
+                std::this_thread::sleep_for(std::chrono::microseconds(200));
+            }
+            continue;
+        }
+
         if (valid_device_index(devices, dev_idx)) {
             int idx = static_cast<int>(i);
             devices[dev_idx]->QueryPos(idx);
@@ -342,6 +450,15 @@ void BaseRobot::QueryVersion_N(int N) {
     }
 
     const int dev_idx = global_motors[N].info.device_index;
+    if (global_motors[N].info.api_type == 4) {
+        if (valid_feetech_index(feetech_devices, dev_idx)) {
+            feetech_devices[dev_idx]->QueryVersion(N);
+        } else {
+            std::cerr << "[Error] QueryVersion_N: Feetech device not found for motor " << N << std::endl;
+        }
+        return;
+    }
+
     if (valid_device_index(devices, dev_idx)) {
         devices[dev_idx]->QueryVersion(N);
     } else {

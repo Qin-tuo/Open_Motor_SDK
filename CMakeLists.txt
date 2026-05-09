@@ -18,6 +18,7 @@ find_package(Threads REQUIRED)
 set(KHCAN_DRIVER_SRCS
   src/config_loader.cpp
   src/device.cpp
+  src/feetech_servo_device.cpp
   src/haitai_protocol.cpp
   src/mapper.cpp
   src/robot.cpp
@@ -36,7 +37,7 @@ target_link_libraries(khcan_driver PUBLIC
   Threads::Threads
 )
 
-foreach(tool show_status test_mit_mode test_haitai_mode)
+foreach(tool show_status test_mit_mode test_haitai_mode test_feetech_servo set_feetech_id)
   add_executable(${tool}
     main/${tool}.cpp
   )
@@ -56,7 +57,7 @@ install(TARGETS khcan_driver
   INCLUDES DESTINATION include
 )
 
-install(TARGETS show_status test_mit_mode test_haitai_mode
+install(TARGETS show_status test_mit_mode test_haitai_mode test_feetech_servo set_feetech_id
   DESTINATION lib/${PROJECT_NAME}
 )
 

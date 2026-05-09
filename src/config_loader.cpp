@@ -88,11 +88,20 @@ bool get_haitai_model_defaults(const std::string& key, MotorModelDefaults& out) 
     return false;
 }
 
+bool get_feetech_model_defaults(const std::string& key, MotorModelDefaults& out) {
+    if (key_is(key, {"SCS0037", "SCS0037-C001"})) {
+        out = {0.0f, 4.712389f, 0.0f, 19.373f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.18f};
+        return true;
+    }
+    return false;
+}
+
 bool get_model_defaults(int api_type, const std::string& type, MotorModelDefaults& out) {
     const std::string key = normalize_model_name(type);
     if (api_type == 1) return get_robstride_model_defaults(key, out);
     if (api_type == 2) return get_encos_model_defaults(key, out);
     if (api_type == 3) return get_dm_model_defaults(key, out);
+    if (api_type == 4) return get_feetech_model_defaults(key, out);
     if (api_type == 7) return get_haitai_model_defaults(key, out);
     return false;
 }
@@ -111,7 +120,7 @@ void apply_model_defaults(Motor_CAN_Info_Struct& motor, const MotorModelDefaults
 }
 
 bool supports_required_model_defaults(int api_type) {
-    return api_type == 1 || api_type == 2 || api_type == 3 || api_type == 7;
+    return api_type == 1 || api_type == 2 || api_type == 3 || api_type == 4 || api_type == 7;
 }
 
 }  // namespace
@@ -204,8 +213,17 @@ std::vector<Motor_CAN_Info_Struct> MotorConfigLoader::loadConfig(const std::stri
         get_str(m.type, "type");
 
         get_val(m.api_type, "api_type");
-        get_val(m.chan, "chan");
-        m.device_name = "can" + std::to_string(m.chan);
+        m.chan = 0;
+        m.port.clear();
+        m.baud = 500000;
+        if (m.api_type == 4) {
+            get_str(m.port, "port");
+            get_val(m.baud, "baud", false);
+            m.device_name = m.port;
+        } else {
+            get_val(m.chan, "chan");
+            m.device_name = "can" + std::to_string(m.chan);
+        }
         get_val(m.canid, "canid");
 
         // Defaults for optional fields (especially for api_type=5 minimal config).

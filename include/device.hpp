@@ -80,15 +80,6 @@ private:
     void SendCommand_Type3(int& motor_index);
     void QueryPos_Type3(int& motor_index);
 
-    // Type 4 (RoboMaster C620)
-    void EnableMotor_Type4(int& motor_index);
-    void DisableMotor_Type4(int& motor_index);
-    void ClearError_Type4(int& motor_index);
-    void SetZero_Type4(int& motor_index);
-    void SetMode_Type4(int& motor_index, int mode);
-    void SendCommand_Type4(int& motor_index);
-    void QueryPos_Type4(int& motor_index);
-
     // Type 5 (HighTorque/高擎)
     void EnableMotor_Type5(int& motor_index);
     void DisableMotor_Type5(int& motor_index);
