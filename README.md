@@ -1,6 +1,6 @@
 # khcan 使用说明
-# ***!!!注意灵足/富兴，因克斯，达秒对于不同电机型号的p_min,p_max等均不相同 必须严格按照电机型号填写对应数据!!! 否则会导致电机比例映射不正常***
-**具体可在 https://can.robotsfan.com/ 此网站查看**
+# ***!!!注意灵足/富兴、因克斯、达妙/达秒、海泰不同型号的 p/v/t/kp/kd 映射范围不同，必须使用正确型号或显式填写完整映射参数，否则会导致电机比例映射不正常!!!***
+**驱动已内置 https://can.robotsfan.com/ 中常见型号参数；TOML 中填写具体 `type` 即可自动匹配，未知型号才需要显式填写 `p_min/p_max/v_min/v_max/kp_min/kp_max/kd_min/kd_max/t_min/t_max`。**
 # **Type5（高擎）和 Type6（PFL28）默认使用 CAN FD。**
 
 ## 简介
@@ -155,7 +155,7 @@ config/motor.toml
 |---|---|---|---|
 | `num` | 逻辑编号（业务编号） | 整数 | 否（仅上层标识） |
 | `name` | 电机名称（便于日志识别） | 字符串 | 否 |
-| `type` | 电机型号名（如 `LZRS06`、`M4438_30`、`PFL28`、`HT3505-J8`） | 字符串 | Type5 下会参与力矩/增益缩放；Type7 下用于海泰 MIT 默认限幅 |
+| `type` | 电机型号名（如 `RS06`、`EC-A4310-P2-36`、`DM8009`、`M4438_30`、`PFL28`、`HT3505-J8`） | 字符串 | Type1/2/3/7 下用于自动匹配 MIT 映射范围；Type5 下参与力矩/增益缩放 |
 | `api_type` | 协议类型编号 | `1/2/3/4/5/6/7` | 是（决定走哪套协议） |
 | `chan` | CAN 通道号 | 正整数，如 `1` | 间接（映射接口名） |
 | `canid` | 电机 CAN ID | 通常 `1~255`（按驱动手册） | 是 |
@@ -200,14 +200,16 @@ config/motor.toml
 
 ### 关键说明
 - `chan` 会转换成设备名 `can<chan>`。例如 `chan = 1` 会使用 `can1`。
-- `type` 不参与协议分发（协议分发只看 `api_type`），但在 `api_type=5`（高擎）时会用于型号缩放适配：
+- `type` 不参与协议分发（协议分发只看 `api_type`），但在 `api_type=1/2/3/7` 时会自动匹配 MIT 映射范围；在 `api_type=5`（高擎）时会用于型号缩放适配：
   - 力矩发送使用型号补偿（`tqe_adjust` 思路）
   - 力矩回读使用型号还原（`tqe_restore` 思路）
   - MIT 模式的 `kp/kd` 也会做型号补偿
   - 若 `type` 未匹配已知型号，则回退为 `k=1.0,d=0.0`（等价无补偿）
 - `api_type=6`（PFL28）默认将 `send.position` 作为位置命令、`send.torque` 作为电流命令（A）。
-- `api_type=7`（海泰 Rev.3.07b0）默认将 `send.mode=0` 映射为 `0xC2` 绝对位置控制；`SetMode_N()` 支持 `0` 绝对位置、`1` 电流、`2` 速度、`3` 相对位置、`4` MIT 模式。海泰 `QueryPos` 使用 `0xA4` 复合状态查询，能同时回读位置、速度、电流和温度；使能时会额外查询 `0xF0` MIT 限幅，未收到限幅前按协议默认 `95.5rad / 45rad/s / 18Nm` 发送 MIT 帧。
-- Type7 海泰可在 `type` 中填写具体型号并自动使用 MIT 默认限幅：`HT3505-J8` 为 `95.5rad / 32.04rad/s / 0.85Nm`，`HT4310-J10` 为 `95.5rad / 31.42rad/s / 5.8Nm`，`HT6010-J6` 为 `95.5rad / 70.16rad/s / 9.0Nm`。未知型号回退到协议默认 `95.5rad / 45rad/s / 18Nm`；TOML 中显式填写的 `p/v/t/kp/kd` 字段始终优先覆盖内置默认值。进入 `mode=4` 时驱动会用当前配置通过 `0xF0` 同步 MIT 限幅到驱动板。
+- Type1/2/3/7 的内置型号参数来自 `https://can.robotsfan.com/`：灵足/富兴支持 `RS00`~`RS06`、`CyberGear`；因克斯支持 `EC-A8112-P1-18`、`EC-A4310-P2-36`、`EC-A6408-P2-25`、`EC-A10020-P1-12`、`EC-A10020-P2-24`、`EC-A13715-P1-12.67`、`EC-A13720-P1-11.4`；达妙/达秒支持 `DM4310`、`DM4310_48V`、`DM4340`、`DM4340_48V`、`DM6006`、`DM8006`、`DM8009`、`DM10010L`、`DM10010`、`DMH3510`、`DMH6215`、`DMG6220`。
+- 对 Type1/2/3/7，`kp_in_use` 和 `kd_in_use` 仍建议显式保留在 TOML 中，便于现场调参；`p/v/t/kp/kd` 的 `min/max` 可由型号表自动填写，也可以在 TOML 中显式覆盖。
+- `api_type=7`（海泰 Rev.3.07b0）默认将 `send.mode=0` 映射为 `0xC2` 绝对位置控制；`SetMode_N()` 支持 `0` 绝对位置、`1` 电流、`2` 速度、`3` 相对位置、`4` MIT 模式。海泰 `QueryPos` 使用 `0xA4` 复合状态查询，能同时回读位置、速度、电流和温度；使能时会额外查询 `0xF0` MIT 限幅，进入 `mode=4` 时驱动会用当前配置通过 `0xF0` 同步 MIT 限幅到驱动板。
+- Type7 海泰可在 `type` 中填写具体型号并自动使用 MIT 默认限幅：`HT2205` 为 `95.5rad / 125.66rad/s / 0.06Nm`，`HT3505-J8` 为 `95.5rad / 32.04rad/s / 0.85Nm`，`HT4305` / `HT4305-J10` 为 `95.5rad / 41.89rad/s / 3.0Nm`，`HT4310-J10` 为 `95.5rad / 31.42rad/s / 5.8Nm`，`HT6010-J6` 为 `95.5rad / 70.16rad/s / 9.0Nm`。未知型号回退到协议默认 `95.5rad / 45rad/s / 18Nm`；TOML 中显式填写的 `p/v/t/kp/kd` 字段始终优先覆盖内置默认值。进入 `mode=4` 时驱动会用当前配置通过 `0xF0` 同步 MIT 限幅到驱动板。
 - `p/v/t/kp/kd` 的 `min/max` 既用于发送映射，也用于接收反解（不同 `api_type` 有差异，但都依赖这些边界）。
 - `kp_in_use`、`kd_in_use` 会在初始化时拷贝到每个电机的发送缓存，后续可再通过接口动态修改。
 - `pos_min`、`pos_max` 用于 `Move/Move_N` 的发送前限幅；若 `pos_min >= pos_max`，限幅逻辑会被跳过（等价于不启用软限位）。
@@ -215,15 +217,17 @@ config/motor.toml
 Type5 当前内置的常见型号系数：`M3536_32`、`M4438_30`、`M4438_32`、`M4538_19`、`M5043_20`、`M5046_20`、`M5047_09`、`M5047_36`、`M6056_36`、`M7256_35`、`M60SG_35`、`M60BM_35`。
 
 ### 示例编写
-灵足：{num = 1, name = "R_1", type = "LZRS06", api_type = 1, chan = 1, canid = 4, p_min = -12.57, p_max = 12.57, v_min = -50, v_max = 50, kp_min = 0, kp_max = 5000, kd_min = 0, kd_max = 100, t_min = -36, t_max = 36, kp_in_use = 50, kd_in_use = 0.5, pos_min = 0.0, pos_max = 0.0}
+灵足/富兴（按型号自动加载 MIT 映射范围）：{num = 1, name = "R_1", type = "RS06", api_type = 1, chan = 1, canid = 4, kp_in_use = 50, kd_in_use = 0.5, pos_min = 0.0, pos_max = 0.0}
 
-达秒：{num = 1, name = "R_F_1", type = "DMJ8009P", api_type = 3, chan = 1, canid = 1, p_min = -12.5, p_max = 12.5, v_min = -45, v_max = 45, kp_min = 0, kp_max = 500, kd_min = 0, kd_max = 5, t_min = -54, t_max = 54, kp_in_use = 1, kd_in_use = 1, pos_min = 0.0, pos_max = 0.0 }
+因克斯（按型号自动加载 MIT 映射范围）：{num = 2, name = "R_EC_1", type = "EC-A4310-P2-36", api_type = 2, chan = 1, canid = 1, kp_in_use = 20, kd_in_use = 0.8, pos_min = 0.0, pos_max = 0.0}
+
+达妙/达秒（按型号自动加载 MIT 映射范围）：{num = 3, name = "R_DM_1", type = "DM8009", api_type = 3, chan = 1, canid = 1, kp_in_use = 1, kd_in_use = 1, pos_min = 0.0, pos_max = 0.0}
 
 高擎（推荐填写具体型号）：{num = 7, name = "R_Arm", type = "M4438_30", api_type = 5, chan = 1, canid = 1,  kp_in_use = 150, kd_in_use = 0.2 }
 
 PFL28（位置+电流控制）：{num = 11, name = "R_PUSHROD", type = "PFL28", api_type = 6, chan = 0, canid = 1, p_min = 0.0, p_max = 9.5, t_min = 0.0, t_max = 2.5, pos_min = 0.0, pos_max = 9.5}
 
-海泰（按具体型号加载 MIT 默认限幅）：{num = 21, name = "R_HT_1", type = "HT3505-J8", api_type = 7, chan = 1, canid = 1, pos_min = -6.28, pos_max = 6.28}
+海泰（按具体型号加载 MIT 默认限幅）：{num = 21, name = "R_HT_1", type = "HT3505-J8", api_type = 7, chan = 1, canid = 1, kp_in_use = 20.0, kd_in_use = 0.8, pos_min = -6.28, pos_max = 6.28}
 
 ## 编译
 建议在工作区根目录执行：
