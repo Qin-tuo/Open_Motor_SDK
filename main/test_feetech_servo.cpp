@@ -76,6 +76,12 @@ int main() {
               << ", baud=" << info.baud
               << ", id=" << info.canid << std::endl;
 
+    if (!robot.IsMotorReady(target_idx)) {
+        std::cerr << "[Error] Feetech servo is not ready. Check serial port access and wiring: "
+                  << info.port << std::endl;
+        return 1;
+    }
+
     robot.ClearError_N(target_idx);
     robot.Enable_N(target_idx);
     std::this_thread::sleep_for(std::chrono::milliseconds(50));

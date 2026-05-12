@@ -465,3 +465,16 @@ void BaseRobot::QueryVersion_N(int N) {
         std::cerr << "[Error] QueryVersion_N: device not found for motor " << N << std::endl;
     }
 }
+
+bool BaseRobot::IsMotorReady(int N) const {
+    if (!valid_motor_index(global_motors, N)) {
+        return false;
+    }
+
+    const int dev_idx = global_motors[N].info.device_index;
+    if (global_motors[N].info.api_type == 4) {
+        return valid_feetech_index(feetech_devices, dev_idx);
+    }
+
+    return valid_device_index(devices, dev_idx);
+}

@@ -50,6 +50,7 @@ public:
     void QueryPos_ALL();
     void QueryPos_N(int N);
     void QueryVersion_N(int N);
+    bool IsMotorReady(int N) const;
 
     void PrintStatus();
     std::vector<float> GetPosAll();
