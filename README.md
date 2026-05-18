@@ -8,7 +8,7 @@
 当前包会安装可复用驱动库 `libkhcan_driver.so`，其他 ROS 2 工程可直接链接该库进行控制；`main/` 下仅保留少量诊断入口。
 当前仓库中可用的入口程序有：
 - `show_status`：从 `config/motor.toml` 读取配置，初始化并周期性查询所有电机状态
-- `test_mit_mode`：根据 `api_type` 自动切换到 MIT 模式（Type1/2/3/5），对单个电机执行正弦摆动测试
+- `test_mit_mode`：根据 `api_type` 自动切换到 MIT 模式（Type1/2/3/5/8），对单个电机执行正弦摆动测试
 - `test_haitai_mode`：自动选择第一个海泰电机，使用绝对位置模式执行正弦摆动测试
 - `test_feetech_servo`：自动选择第一个 Type4 飞特舵机，执行小幅摆动测试
 - `set_feetech_id`：修改单个飞特 TTL 串口舵机 ID
@@ -32,7 +32,7 @@ khcan/
 
 ## 代码框架对应关系
 - `main/show_status.cpp`：程序入口，执行初始化、清错、使能和状态打印循环
-- `main/test_mit_mode.cpp`：通用 MIT 测试入口，自动适配 Type1/2/3/5 的 MIT 模式编号
+- `main/test_mit_mode.cpp`：通用 MIT 测试入口，自动适配 Type1/2/3/5/8 的 MIT 模式编号
 - `main/test_haitai_mode.cpp`：海泰 Type7 绝对位置测试入口
 - `main/test_feetech_servo.cpp`：飞特 Type4 串口舵机小幅摆动测试入口
 - `main/set_feetech_id.cpp`：飞特舵机 ID 设置工具，改 ID 时必须只连接一个舵机
@@ -163,8 +163,8 @@ config/motor.toml
 |---|---|---|---|
 | `num` | 逻辑编号（业务编号） | 整数 | 否（仅上层标识） |
 | `name` | 电机名称（便于日志识别） | 字符串 | 否 |
-| `type` | 电机/舵机型号名（如 `RS06`、`EC-A4310-P2-36`、`DM8009`、`SCS0037-C001`、`M4438_30`、`PFL28`、`HT3505-J8`） | 字符串 | Type1/2/3/4/7 下用于自动匹配映射范围；Type5 下参与力矩/增益缩放 |
-| `api_type` | 协议类型编号 | `1/2/3/4/5/6/7` | 是（决定走哪套协议） |
+| `type` | 电机/舵机型号名（如 `RS06`、`EC-A4310-P2-36`、`DM8009`、`SCS0037-C001`、`M4438_30`、`PFL28`、`HT3505-J8`） | 字符串 | Type1/3/4/7/8 下用于自动匹配映射范围；Type5 下参与力矩/增益缩放 |
+| `api_type` | 协议类型编号 | `1/2/3/4/5/6/7/8` | 是（决定走哪套协议） |
 | `chan` | CAN 通道号 | 正整数，如 `1` | CAN 电机使用，Type4 飞特串口舵机不填 |
 | `port` | 串口设备路径 | 如 `/dev/ttyUSB0` | Type4 飞特串口舵机使用 |
 | `baud` | 串口波特率 | SCS0037 默认 `500000` | Type4 飞特串口舵机使用，可省略 |
@@ -192,9 +192,10 @@ config/motor.toml
 - `5`：Type5（高擎 16-bit ID 协议）
 - `6`：Type6（AgiBot PFL28/L28，`pos(float)+current(float)`）
 - `7`：Type7（海泰标准帧协议）
+- `8`：Type8（ENCOS / 因克斯 EC-A 系列标准帧协议）
 
 ### 驱动能力确认
-当前清理只删除了独立测试/排障入口，不影响底层电机驱动能力。Type1/2/3/5/6/7 仍走 `DeviceX` 的 SocketCAN/CAN FD 路径；Type4 已切换为飞特串口舵机路径，不再使用 SocketCAN。
+当前清理只删除了独立测试/排障入口，不影响底层电机驱动能力。Type1/2/3/5/6/7/8 仍走 `DeviceX` 的 SocketCAN/CAN FD 路径；Type4 已切换为飞特串口舵机路径，不再使用 SocketCAN。
 
 | `api_type` | 驱动能力 | 当前诊断入口 |
 |---|---|---|
@@ -205,21 +206,23 @@ config/motor.toml
 | `5` | 保留 Type5 / 高擎 CAN FD 协议发送与反馈解析 | `test_mit_mode` 可用于 MIT 模式简单验证 |
 | `6` | 保留 Type6 / PFL28 协议发送与反馈解析 | 独立 PFL28 诊断入口已删除，请通过库 API 控制 |
 | `7` | 保留 Type7 / 海泰 Rev.3.07b0 标准 CAN 协议发送与反馈解析，含绝对位置和 MIT 模式 | 可通过 `show_status` / `test_haitai_mode` 查看状态 |
+| `8` | ENCOS / 因克斯 EC-A 系列标准 CAN 协议发送与反馈解析，支持 MIT/位置/速度/力矩 | `test_mit_mode` 可用于 MIT 模式简单验证 |
 
 也就是说，上层仍通过 `BaseRobot::Move_N()` / `BaseRobot::Move()` 进入统一发送路径；CAN 电机按各自 `api_type` 分发到 `DeviceX`，Type4 飞特舵机会分发到串口驱动。
 
 ### 关键说明
 - `chan` 会转换成设备名 `can<chan>`。例如 `chan = 1` 会使用 `can1`；Type4 飞特串口舵机不用 `chan`，改填 `port`。
-- `type` 不参与协议分发（协议分发只看 `api_type`），但在 `api_type=1/2/3/4/7` 时会自动匹配映射范围；在 `api_type=5`（高擎）时会用于型号缩放适配：
+- `type` 不参与协议分发（协议分发只看 `api_type`），但在 `api_type=1/3/4/7/8` 时会自动匹配映射范围；在 `api_type=5`（高擎）时会用于型号缩放适配：
   - 力矩发送使用型号补偿（`tqe_adjust` 思路）
   - 力矩回读使用型号还原（`tqe_restore` 思路）
   - MIT 模式的 `kp/kd` 也会做型号补偿
   - 若 `type` 未匹配已知型号，则回退为 `k=1.0,d=0.0`（等价无补偿）
 - `api_type=6`（PFL28）默认将 `send.position` 作为位置命令、`send.torque` 作为电流命令（A）。
+- `api_type=8`（ENCOS / 因克斯 EC-A）使用经典标准 CAN 帧；`SetMode_N()` 支持 `0` MIT 混控、`1` 位置、`2` 速度、`3` 力矩/电流，`send.position/speed/torque/kp/kd` 按 EC-A 型号映射范围打包。
 - `api_type=4`（飞特 SCS0037-C001）默认将 `send.position` 按 `0~4.712389rad` 映射到舵机 `0~1023` 位置值；`send.speed` 按 rad/s 转成飞特速度值，填 `0` 表示不限制/由舵机默认处理；`send.torque` 暂不参与飞特位置指令。
 - 修改飞特舵机 ID 前，必须确保总线上只接一个舵机，避免多个出厂默认 `ID=1` 的舵机被同时改成同一个 ID。
-- Type1/2/3/7 的内置型号参数来自 `https://can.robotsfan.com/`：灵足/富兴支持 `RS00`~`RS06`、`CyberGear`；因克斯支持 `EC-A8112-P1-18`、`EC-A4310-P2-36`、`EC-A6408-P2-25`、`EC-A10020-P1-12`、`EC-A10020-P2-24`、`EC-A13715-P1-12.67`、`EC-A13720-P1-11.4`；达妙/达秒支持 `DM4310`、`DM4310_48V`、`DM4340`、`DM4340_48V`、`DM6006`、`DM8006`、`DM8009`、`DM10010L`、`DM10010`、`DMH3510`、`DMH6215`、`DMG6220`。
-- 对 Type1/2/3/4/7，`kp_in_use` 和 `kd_in_use` 仍建议显式保留在 TOML 中，便于现场调参；Type4 当前不使用 kp/kd 做闭环控制，但保留字段以兼容统一配置。`p/v/t/kp/kd` 的 `min/max` 可由型号表自动填写，也可以在 TOML 中显式覆盖。
+- Type1/3/7/8 的内置型号参数来自 `https://can.robotsfan.com/`：灵足/富兴支持 `RS00`~`RS06`、`CyberGear`；ENCOS/因克斯支持 `EC-A8112-P1-18`、`EC-A4310-P2-36`、`EC-A6408-P2-25`、`EC-A10020-P1-12`、`EC-A10020-P2-24`、`EC-A13715-P1-12.67`、`EC-A13720-P1-11.4`；达妙/达秒支持 `DM4310`、`DM4310_48V`、`DM4340`、`DM4340_48V`、`DM6006`、`DM8006`、`DM8009`、`DM10010L`、`DM10010`、`DMH3510`、`DMH6215`、`DMG6220`。
+- 对 Type1/2/3/4/7/8，`kp_in_use` 和 `kd_in_use` 仍建议显式保留在 TOML 中，便于现场调参；Type4 当前不使用 kp/kd 做闭环控制，但保留字段以兼容统一配置。`p/v/t/kp/kd` 的 `min/max` 可由型号表自动填写，也可以在 TOML 中显式覆盖。
 - `api_type=7`（海泰 Rev.3.07b0）默认将 `send.mode=0` 映射为 `0xC2` 绝对位置控制；`SetMode_N()` 支持 `0` 绝对位置、`1` 电流、`2` 速度、`3` 相对位置、`4` MIT 模式。海泰 `QueryPos` 使用 `0xA4` 复合状态查询，能同时回读位置、速度、电流和温度；使能时会额外查询 `0xF0` MIT 限幅，进入 `mode=4` 时驱动会用当前配置通过 `0xF0` 同步 MIT 限幅到驱动板。
 - Type7 海泰可在 `type` 中填写具体型号并自动使用 MIT 默认限幅：`HT2205` 为 `95.5rad / 125.66rad/s / 0.06Nm`，`HT3505-J8` 为 `95.5rad / 32.04rad/s / 0.85Nm`，`HT4305` / `HT4305-J10` 为 `95.5rad / 41.89rad/s / 3.0Nm`，`HT4310-J10` 为 `95.5rad / 31.42rad/s / 5.8Nm`，`HT6010-J6` 为 `95.5rad / 70.16rad/s / 9.0Nm`。未知型号回退到协议默认 `95.5rad / 45rad/s / 18Nm`；TOML 中显式填写的 `p/v/t/kp/kd` 字段始终优先覆盖内置默认值。进入 `mode=4` 时驱动会用当前配置通过 `0xF0` 同步 MIT 限幅到驱动板。
 - `p/v/t/kp/kd` 的 `min/max` 既用于发送映射，也用于接收反解（不同 `api_type` 有差异，但都依赖这些边界）。
@@ -231,7 +234,9 @@ Type5 当前内置的常见型号系数：`M3536_32`、`M4438_30`、`M4438_32`�
 ### 示例编写
 灵足/富兴（按型号自动加载 MIT 映射范围）：{num = 1, name = "R_1", type = "RS06", api_type = 1, chan = 1, canid = 4, kp_in_use = 50, kd_in_use = 0.5, pos_min = 0.0, pos_max = 0.0}
 
-因克斯（按型号自动加载 MIT 映射范围）：{num = 2, name = "R_EC_1", type = "EC-A4310-P2-36", api_type = 2, chan = 1, canid = 1, kp_in_use = 20, kd_in_use = 0.8, pos_min = 0.0, pos_max = 0.0}
+领控（Type2）：{num = 2, name = "R_LK_1", type = "LK", api_type = 2, chan = 1, canid = 1, p_min = -12.5, p_max = 12.5, v_min = -18.0, v_max = 18.0, kp_min = 0.0, kp_max = 500.0, kd_min = 0.0, kd_max = 5.0, t_min = -30.0, t_max = 30.0, kp_in_use = 20, kd_in_use = 0.8, pos_min = 0.0, pos_max = 0.0}
+
+ENCOS / 因克斯（按型号自动加载 MIT 映射范围）：{num = 8, name = "R_EC_1", type = "EC-A4310-P2-36", api_type = 8, chan = 1, canid = 1, kp_in_use = 20, kd_in_use = 0.8, pos_min = 0.0, pos_max = 0.0}
 
 达妙/达秒（按型号自动加载 MIT 映射范围）：{num = 3, name = "R_DM_1", type = "DM8009", api_type = 3, chan = 1, canid = 1, kp_in_use = 1, kd_in_use = 1, pos_min = 0.0, pos_max = 0.0}
 

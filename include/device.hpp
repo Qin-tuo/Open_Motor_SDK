@@ -107,4 +107,13 @@ private:
     void SendCommand_Type7(int& motor_index);
     void QueryPos_Type7(int& motor_index);
     void QueryVersion_Type7(int& motor_index);
+
+    // Type 8 (ENCOS EC-A series)
+    void EnableMotor_Type8(int& motor_index);
+    void DisableMotor_Type8(int& motor_index);
+    void ClearError_Type8(int& motor_index);
+    void SetZero_Type8(int& motor_index);
+    void SetMode_Type8(int& motor_index, int mode);
+    void SendCommand_Type8(int& motor_index);
+    void QueryPos_Type8(int& motor_index);
 };

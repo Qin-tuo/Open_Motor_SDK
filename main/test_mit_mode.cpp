@@ -16,7 +16,7 @@ static void handle_sigint(int) {
 }
 
 static bool supports_mit_mode(int api_type) {
-    return api_type == 1 || api_type == 2 || api_type == 3 || api_type == 5;
+    return api_type == 1 || api_type == 2 || api_type == 3 || api_type == 5 || api_type == 8;
 }
 
 static int mit_mode_for_api_type(int api_type) {
@@ -25,6 +25,7 @@ static int mit_mode_for_api_type(int api_type) {
         case 2: return 1; // Type2 MIT
         case 3: return 0; // Type3 MIT
         case 5: return 0; // Type5 MIT
+        case 8: return 0; // Type8 ENCOS MIT
         default: return -1;
     }
 }
@@ -102,7 +103,7 @@ int main() {
 
     const int target_idx = select_target_motor_index(robot);
     if (target_idx < 0) {
-        std::cerr << "[Error] No MIT-capable motor found. Supported api_type: 1/2/3/5." << std::endl;
+        std::cerr << "[Error] No MIT-capable motor found. Supported api_type: 1/2/3/5/8." << std::endl;
         return 1;
     }
 

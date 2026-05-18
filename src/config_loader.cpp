@@ -99,7 +99,7 @@ bool get_feetech_model_defaults(const std::string& key, MotorModelDefaults& out)
 bool get_model_defaults(int api_type, const std::string& type, MotorModelDefaults& out) {
     const std::string key = normalize_model_name(type);
     if (api_type == 1) return get_robstride_model_defaults(key, out);
-    if (api_type == 2) return get_encos_model_defaults(key, out);
+    if (api_type == 8) return get_encos_model_defaults(key, out);
     if (api_type == 3) return get_dm_model_defaults(key, out);
     if (api_type == 4) return get_feetech_model_defaults(key, out);
     if (api_type == 7) return get_haitai_model_defaults(key, out);
@@ -120,7 +120,8 @@ void apply_model_defaults(Motor_CAN_Info_Struct& motor, const MotorModelDefaults
 }
 
 bool supports_required_model_defaults(int api_type) {
-    return api_type == 1 || api_type == 2 || api_type == 3 || api_type == 4 || api_type == 7;
+    return api_type == 1 || api_type == 2 || api_type == 3 ||
+           api_type == 4 || api_type == 7 || api_type == 8;
 }
 
 }  // namespace

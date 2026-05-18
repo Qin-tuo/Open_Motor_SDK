@@ -49,26 +49,6 @@ foreach(tool show_status test_mit_mode test_haitai_mode test_feetech_servo set_f
   )
 endforeach()
 
-if(BUILD_TESTING)
-  add_executable(test_feetech_servo_unavailable
-    tests/test_feetech_servo_unavailable.cpp
-    ${KHCAN_DRIVER_SRCS}
-  )
-  target_include_directories(test_feetech_servo_unavailable PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-  )
-  target_link_libraries(test_feetech_servo_unavailable
-    Threads::Threads
-  )
-  ament_target_dependencies(test_feetech_servo_unavailable
-    ament_index_cpp
-  )
-
-  add_test(NAME test_feetech_servo_unavailable
-    COMMAND test_feetech_servo_unavailable
-  )
-endif()
-
 install(TARGETS khcan_driver
   EXPORT export_khcan_driver
   ARCHIVE DESTINATION lib

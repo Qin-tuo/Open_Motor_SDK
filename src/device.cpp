@@ -1,5 +1,6 @@
 #include "device.hpp"
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 
@@ -21,6 +22,410 @@
 #include <iomanip>
 #include <sstream>
 #include <thread>
+
+namespace encos {
+
+struct Limits {
+    float p_min = -12.5f;
+    float p_max = 12.5f;
+    float v_min = -18.0f;
+    float v_max = 18.0f;
+    float kp_min = 0.0f;
+    float kp_max = 500.0f;
+    float kd_min = 0.0f;
+    float kd_max = 5.0f;
+    float t_min = -30.0f;
+    float t_max = 30.0f;
+};
+
+struct CommandFrame {
+    uint32_t can_id = 0;
+    uint8_t dlc = 0;
+    std::array<uint8_t, 8> data {};
+};
+
+struct Feedback {
+    bool valid = false;
+    uint8_t type = 0;
+    uint8_t error = 0;
+    bool has_position = false;
+    bool has_speed = false;
+    bool has_current = false;
+    bool has_temperature = false;
+    bool has_state = false;
+    float position_rad = 0.0f;
+    float speed_rad_s = 0.0f;
+    float current_a = 0.0f;
+    float temperature_c = 0.0f;
+    uint8_t state = 0;
+    uint8_t mode = 0;
+};
+
+namespace {
+
+constexpr float TWO_PI_LOCAL = 6.28318530718f;
+constexpr float RAD_TO_DEG_LOCAL = 57.2957795f;
+constexpr float DEG_TO_RAD_LOCAL = 0.017453293f;
+constexpr float RAD_TO_RPM = 60.0f / TWO_PI_LOCAL;
+constexpr float RPM_TO_RAD = TWO_PI_LOCAL / 60.0f;
+constexpr float DEFAULT_CURRENT_LIMIT_A = 10.0f;
+constexpr float DEFAULT_CURRENT_FB_MIN_A = -90.0f;
+constexpr float DEFAULT_CURRENT_FB_MAX_A = 90.0f;
+
+constexpr uint8_t MODE_MIT = 0x00;
+constexpr uint8_t MODE_POSITION = 0x01;
+constexpr uint8_t MODE_SPEED = 0x02;
+constexpr uint8_t MODE_CUR_TOR = 0x03;
+constexpr uint8_t MODE_BRAKE = 0x04;
+constexpr uint8_t MODE_QUERY = 0x07;
+
+constexpr uint8_t ACK_NONE = 0;
+constexpr uint8_t ACK_TYPE1 = 1;
+constexpr uint8_t ACK_TYPE2 = 2;
+constexpr uint8_t ACK_TYPE3 = 3;
+
+constexpr uint8_t CUR_STATE_CURRENT = 0;
+constexpr uint8_t CUR_STATE_TORQUE = 1;
+constexpr uint8_t CUR_STATE_DAMPING = 2;
+
+float clip(float value, float low, float high) {
+    return std::max(low, std::min(value, high));
+}
+
+void resolve_range(float cfg_min, float cfg_max, float def_min, float def_max,
+                   float& out_min, float& out_max) {
+    if (cfg_max > cfg_min) {
+        out_min = cfg_min;
+        out_max = cfg_max;
+    } else {
+        out_min = def_min;
+        out_max = def_max;
+    }
+}
+
+uint16_t pos_to_raw(const Limits& limits, float pos_rad) {
+    float p_min = 0.0f;
+    float p_max = 0.0f;
+    resolve_range(limits.p_min, limits.p_max, -12.5f, 12.5f, p_min, p_max);
+    return static_cast<uint16_t>(float_to_uint(pos_rad, p_min, p_max, 16));
+}
+
+float raw_to_pos(const Limits& limits, uint16_t raw) {
+    float p_min = 0.0f;
+    float p_max = 0.0f;
+    resolve_range(limits.p_min, limits.p_max, -12.5f, 12.5f, p_min, p_max);
+    return uint_to_float(static_cast<int>(raw), p_min, p_max, 16);
+}
+
+uint16_t spd_to_raw(const Limits& limits, float spd_rad_s) {
+    float v_min = 0.0f;
+    float v_max = 0.0f;
+    resolve_range(limits.v_min, limits.v_max, -18.0f, 18.0f, v_min, v_max);
+    return static_cast<uint16_t>(float_to_uint(spd_rad_s, v_min, v_max, 12));
+}
+
+float raw_to_spd(const Limits& limits, uint16_t raw) {
+    float v_min = 0.0f;
+    float v_max = 0.0f;
+    resolve_range(limits.v_min, limits.v_max, -18.0f, 18.0f, v_min, v_max);
+    return uint_to_float(static_cast<int>(raw), v_min, v_max, 12);
+}
+
+uint16_t kp_to_raw(const Limits& limits, float kp) {
+    float kp_min = 0.0f;
+    float kp_max = 0.0f;
+    resolve_range(limits.kp_min, limits.kp_max, 0.0f, 500.0f, kp_min, kp_max);
+    return static_cast<uint16_t>(float_to_uint(kp, kp_min, kp_max, 12));
+}
+
+uint16_t kd_to_raw(const Limits& limits, float kd) {
+    float kd_min = 0.0f;
+    float kd_max = 0.0f;
+    resolve_range(limits.kd_min, limits.kd_max, 0.0f, 5.0f, kd_min, kd_max);
+    return static_cast<uint16_t>(float_to_uint(kd, kd_min, kd_max, 9));
+}
+
+uint16_t tor_to_raw(const Limits& limits, float tor) {
+    float t_min = 0.0f;
+    float t_max = 0.0f;
+    resolve_range(limits.t_min, limits.t_max, -30.0f, 30.0f, t_min, t_max);
+    return static_cast<uint16_t>(float_to_uint(tor, t_min, t_max, 12));
+}
+
+uint16_t current_limit_to_raw12(float current_limit_a) {
+    const float clipped = clip(current_limit_a, 0.0f, 409.5f);
+    return static_cast<uint16_t>(std::lround(clipped * 10.0f));
+}
+
+uint16_t current_limit_to_raw16(float current_limit_a) {
+    const float clipped = clip(current_limit_a, 0.0f, 6553.5f);
+    return static_cast<uint16_t>(std::lround(clipped * 10.0f));
+}
+
+uint16_t speed_limit_to_raw15(float speed_rad_s) {
+    const float speed_rpm = std::fabs(speed_rad_s) * RAD_TO_RPM;
+    const float clipped = clip(speed_rpm, 0.0f, 3276.7f);
+    return static_cast<uint16_t>(std::lround(clipped * 10.0f));
+}
+
+int16_t signed_cmd_to_raw(float value) {
+    const float clipped = clip(value, -327.68f, 327.67f);
+    return static_cast<int16_t>(std::lround(clipped * 100.0f));
+}
+
+float raw_to_current_default(int raw_u12) {
+    return uint_to_float(raw_u12, DEFAULT_CURRENT_FB_MIN_A, DEFAULT_CURRENT_FB_MAX_A, 12);
+}
+
+float temp_raw_to_deg(uint8_t raw_temp) {
+    return (static_cast<float>(raw_temp) - 50.0f) * 0.5f;
+}
+
+void write_be_u16(uint8_t* data, uint16_t value) {
+    data[0] = static_cast<uint8_t>((value >> 8) & 0xFF);
+    data[1] = static_cast<uint8_t>(value & 0xFF);
+}
+
+uint16_t read_be_u16(const uint8_t* data) {
+    return static_cast<uint16_t>((static_cast<uint16_t>(data[0]) << 8) |
+                                 static_cast<uint16_t>(data[1]));
+}
+
+int16_t read_be_i16(const uint8_t* data) {
+    return static_cast<int16_t>(read_be_u16(data));
+}
+
+void write_be_f32(uint8_t* data, float value) {
+    uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    data[0] = static_cast<uint8_t>((bits >> 24) & 0xFF);
+    data[1] = static_cast<uint8_t>((bits >> 16) & 0xFF);
+    data[2] = static_cast<uint8_t>((bits >> 8) & 0xFF);
+    data[3] = static_cast<uint8_t>(bits & 0xFF);
+}
+
+float read_be_f32(const uint8_t* data) {
+    const uint32_t bits = (static_cast<uint32_t>(data[0]) << 24) |
+                          (static_cast<uint32_t>(data[1]) << 16) |
+                          (static_cast<uint32_t>(data[2]) << 8) |
+                          static_cast<uint32_t>(data[3]);
+    float value = 0.0f;
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+uint8_t pack_mode_state_ack(uint8_t mode, uint8_t state, uint8_t ack) {
+    return static_cast<uint8_t>(((mode & 0x07) << 5) |
+                                ((state & 0x07) << 2) |
+                                (ack & 0x03));
+}
+
+CommandFrame make_frame(uint32_t can_id, uint8_t dlc) {
+    CommandFrame frame {};
+    frame.can_id = can_id & 0x7FFU;
+    frame.dlc = dlc;
+    return frame;
+}
+
+}  // namespace
+
+Limits limits_from_info(const Motor_CAN_Info_Struct& info) {
+    Limits limits {};
+    limits.p_min = info.p_min;
+    limits.p_max = info.p_max;
+    limits.v_min = info.v_min;
+    limits.v_max = info.v_max;
+    limits.kp_min = info.kp_min;
+    limits.kp_max = info.kp_max;
+    limits.kd_min = info.kd_min;
+    limits.kd_max = info.kd_max;
+    limits.t_min = info.t_min;
+    limits.t_max = info.t_max;
+    return limits;
+}
+
+uint8_t feedback_type(uint8_t first_byte) {
+    return static_cast<uint8_t>((first_byte >> 5) & 0x07);
+}
+
+uint8_t feedback_error(uint8_t first_byte) {
+    return static_cast<uint8_t>(first_byte & 0x1F);
+}
+
+CommandFrame make_brake_release_command(uint32_t can_id) {
+    CommandFrame frame = make_frame(can_id, 2);
+    frame.data[0] = static_cast<uint8_t>(MODE_BRAKE << 5);
+    frame.data[1] = 1;
+    return frame;
+}
+
+CommandFrame make_current_zero_command(uint32_t can_id) {
+    CommandFrame frame = make_frame(can_id, 3);
+    frame.data[0] = pack_mode_state_ack(MODE_CUR_TOR, CUR_STATE_CURRENT, ACK_NONE);
+    return frame;
+}
+
+CommandFrame make_damping_command(uint32_t can_id) {
+    CommandFrame frame = make_frame(can_id, 3);
+    frame.data[0] = pack_mode_state_ack(MODE_CUR_TOR, CUR_STATE_DAMPING, ACK_NONE);
+    return frame;
+}
+
+CommandFrame make_mit_command(uint32_t can_id, const Limits& limits,
+                              float position_rad, float speed_rad_s,
+                              float kp, float kd, float torque) {
+    const uint16_t kp_raw = kp_to_raw(limits, kp);
+    const uint16_t kd_raw = kd_to_raw(limits, kd);
+    const uint16_t pos_raw = pos_to_raw(limits, position_rad);
+    const uint16_t spd_raw = spd_to_raw(limits, speed_rad_s);
+    const uint16_t tor_raw = tor_to_raw(limits, torque);
+
+    CommandFrame frame = make_frame(can_id, 8);
+    frame.data[0] = static_cast<uint8_t>((MODE_MIT << 5) | ((kp_raw >> 7) & 0x1F));
+    frame.data[1] = static_cast<uint8_t>(((kp_raw & 0x7F) << 1) | ((kd_raw >> 8) & 0x01));
+    frame.data[2] = static_cast<uint8_t>(kd_raw & 0xFF);
+    frame.data[3] = static_cast<uint8_t>((pos_raw >> 8) & 0xFF);
+    frame.data[4] = static_cast<uint8_t>(pos_raw & 0xFF);
+    frame.data[5] = static_cast<uint8_t>((spd_raw >> 4) & 0xFF);
+    frame.data[6] = static_cast<uint8_t>(((spd_raw & 0x0F) << 4) | ((tor_raw >> 8) & 0x0F));
+    frame.data[7] = static_cast<uint8_t>(tor_raw & 0xFF);
+    return frame;
+}
+
+CommandFrame make_position_command(uint32_t can_id, float position_rad,
+                                   float speed_limit_rad_s,
+                                   float current_limit_a) {
+    CommandFrame frame = make_frame(can_id, 8);
+    uint8_t pos_data[4] = {0};
+    write_be_f32(pos_data, position_rad * RAD_TO_DEG_LOCAL);
+    const uint32_t pos_bits = (static_cast<uint32_t>(pos_data[0]) << 24) |
+                              (static_cast<uint32_t>(pos_data[1]) << 16) |
+                              (static_cast<uint32_t>(pos_data[2]) << 8) |
+                              static_cast<uint32_t>(pos_data[3]);
+    const uint16_t speed_limit_raw = speed_limit_to_raw15(speed_limit_rad_s);
+    const uint16_t current_limit_raw = current_limit_to_raw12(
+        (std::fabs(current_limit_a) > 1e-6f) ? std::fabs(current_limit_a) : DEFAULT_CURRENT_LIMIT_A);
+
+    frame.data[0] = static_cast<uint8_t>((MODE_POSITION << 5) | ((pos_bits >> 27) & 0x1F));
+    frame.data[1] = static_cast<uint8_t>((pos_bits >> 19) & 0xFF);
+    frame.data[2] = static_cast<uint8_t>((pos_bits >> 11) & 0xFF);
+    frame.data[3] = static_cast<uint8_t>((pos_bits >> 3) & 0xFF);
+    frame.data[4] = static_cast<uint8_t>(((pos_bits & 0x07) << 5) | ((speed_limit_raw >> 10) & 0x1F));
+    frame.data[5] = static_cast<uint8_t>((speed_limit_raw >> 2) & 0xFF);
+    frame.data[6] = static_cast<uint8_t>(((speed_limit_raw & 0x03) << 6) | ((current_limit_raw >> 6) & 0x3F));
+    frame.data[7] = static_cast<uint8_t>(((current_limit_raw & 0x3F) << 2) | (ACK_TYPE2 & 0x03));
+    return frame;
+}
+
+CommandFrame make_speed_command(uint32_t can_id, float speed_rad_s,
+                                float current_limit_a) {
+    CommandFrame frame = make_frame(can_id, 7);
+    const float target_speed_rpm = speed_rad_s * RAD_TO_RPM;
+    const float limit = (std::fabs(current_limit_a) > 1e-6f) ? std::fabs(current_limit_a) : DEFAULT_CURRENT_LIMIT_A;
+
+    frame.data[0] = pack_mode_state_ack(MODE_SPEED, 0, ACK_TYPE3);
+    write_be_f32(&frame.data[1], target_speed_rpm);
+    write_be_u16(&frame.data[5], current_limit_to_raw16(limit));
+    return frame;
+}
+
+CommandFrame make_torque_command(uint32_t can_id, const Limits& limits,
+                                 float torque) {
+    float torque_cmd = torque;
+    if (limits.t_max > limits.t_min) {
+        torque_cmd = clip(torque_cmd, limits.t_min, limits.t_max);
+    }
+
+    CommandFrame frame = make_frame(can_id, 3);
+    frame.data[0] = pack_mode_state_ack(MODE_CUR_TOR, CUR_STATE_TORQUE, ACK_TYPE2);
+    write_be_u16(&frame.data[1], static_cast<uint16_t>(signed_cmd_to_raw(torque_cmd)));
+    return frame;
+}
+
+CommandFrame make_query_command(uint32_t can_id, uint8_t query_code) {
+    CommandFrame frame = make_frame(can_id, 2);
+    frame.data[0] = pack_mode_state_ack(MODE_QUERY, 0, ACK_TYPE1);
+    frame.data[1] = query_code;
+    return frame;
+}
+
+Feedback parse_feedback(const uint8_t* data, uint8_t len, const Limits& limits) {
+    Feedback feedback {};
+    if (!data || len < 2) {
+        return feedback;
+    }
+
+    feedback.valid = true;
+    feedback.type = feedback_type(data[0]);
+    feedback.error = feedback_error(data[0]);
+
+    if (feedback.type == 1) {
+        if (len >= 8) {
+            const uint16_t pos_raw = static_cast<uint16_t>((static_cast<uint16_t>(data[1]) << 8) | data[2]);
+            const uint16_t spd_raw = static_cast<uint16_t>((static_cast<uint16_t>(data[3]) << 4) | (data[4] >> 4));
+            const uint16_t cur_raw = static_cast<uint16_t>(((data[4] & 0x0F) << 8) | data[5]);
+
+            feedback.has_position = true;
+            feedback.has_speed = true;
+            feedback.has_current = true;
+            feedback.has_temperature = true;
+            feedback.position_rad = raw_to_pos(limits, pos_raw);
+            feedback.speed_rad_s = raw_to_spd(limits, spd_raw);
+            feedback.current_a = raw_to_current_default(static_cast<int>(cur_raw));
+            feedback.temperature_c = temp_raw_to_deg(data[6]);
+        }
+        feedback.mode = 1;
+    } else if (feedback.type == 2) {
+        if (len >= 8) {
+            feedback.has_position = true;
+            feedback.has_current = true;
+            feedback.has_temperature = true;
+            feedback.position_rad = read_be_f32(&data[1]) * DEG_TO_RAD_LOCAL;
+            feedback.current_a = static_cast<float>(read_be_i16(&data[5])) * 0.01f;
+            feedback.temperature_c = temp_raw_to_deg(data[7]);
+        }
+        feedback.mode = 2;
+    } else if (feedback.type == 3) {
+        if (len >= 8) {
+            feedback.has_speed = true;
+            feedback.has_current = true;
+            feedback.has_temperature = true;
+            feedback.speed_rad_s = read_be_f32(&data[1]) * RPM_TO_RAD;
+            feedback.current_a = static_cast<float>(read_be_i16(&data[5])) * 0.01f;
+            feedback.temperature_c = temp_raw_to_deg(data[7]);
+        }
+        feedback.mode = 3;
+    } else if (feedback.type == 4) {
+        if (len >= 3) {
+            feedback.has_state = true;
+            feedback.state = data[2];
+        }
+    } else if (feedback.type == 5) {
+        const uint8_t query_code = data[1];
+        if (query_code == 1 && len >= 6) {
+            feedback.has_position = true;
+            feedback.position_rad = read_be_f32(&data[2]) * DEG_TO_RAD_LOCAL;
+        } else if (query_code == 2 && len >= 6) {
+            feedback.has_speed = true;
+            feedback.speed_rad_s = read_be_f32(&data[2]) * RPM_TO_RAD;
+        } else if (query_code == 3 && len >= 6) {
+            feedback.has_current = true;
+            feedback.current_a = read_be_f32(&data[2]);
+        } else if (query_code == 37 && len >= 3) {
+            feedback.has_state = true;
+            feedback.state = data[2];
+        }
+    } else if (feedback.type == 6) {
+        if (len >= 2) {
+            feedback.has_state = true;
+            feedback.state = data[1];
+        }
+    }
+
+    return feedback;
+}
+
+}  // namespace encos
 
 // =========================================================
 //  Constants
@@ -506,6 +911,7 @@ void DeviceX::EnableMotor(int& motor_index) {
     else if (type == 5) EnableMotor_Type5(motor_index);
     else if (type == 6) EnableMotor_Type6(motor_index);
     else if (type == 7) EnableMotor_Type7(motor_index);
+    else if (type == 8) EnableMotor_Type8(motor_index);
 }
 
 void DeviceX::DisableMotor(int& motor_index) {
@@ -519,6 +925,7 @@ void DeviceX::DisableMotor(int& motor_index) {
     else if (type == 5) DisableMotor_Type5(motor_index);
     else if (type == 6) DisableMotor_Type6(motor_index);
     else if (type == 7) DisableMotor_Type7(motor_index);
+    else if (type == 8) DisableMotor_Type8(motor_index);
 }
 
 void DeviceX::ClearError(int& motor_index) {
@@ -532,6 +939,7 @@ void DeviceX::ClearError(int& motor_index) {
     else if (type == 5) ClearError_Type5(motor_index);
     else if (type == 6) ClearError_Type6(motor_index);
     else if (type == 7) ClearError_Type7(motor_index);
+    else if (type == 8) ClearError_Type8(motor_index);
 }
 
 void DeviceX::SetZero(int& motor_index) {
@@ -545,6 +953,7 @@ void DeviceX::SetZero(int& motor_index) {
     else if (type == 5) SetZero_Type5(motor_index);
     else if (type == 6) SetZero_Type6(motor_index);
     else if (type == 7) SetZero_Type7(motor_index);
+    else if (type == 8) SetZero_Type8(motor_index);
 }
 
 void DeviceX::SetMode(int& motor_index, int mode) {
@@ -558,6 +967,7 @@ void DeviceX::SetMode(int& motor_index, int mode) {
     else if (type == 5) SetMode_Type5(motor_index, mode);
     else if (type == 6) SetMode_Type6(motor_index, mode);
     else if (type == 7) SetMode_Type7(motor_index, mode);
+    else if (type == 8) SetMode_Type8(motor_index, mode);
 }
 
 void DeviceX::SendCommand(int& motor_index) {
@@ -574,6 +984,7 @@ void DeviceX::SendCommand(int& motor_index) {
     else if (type == 5) SendCommand_Type5(motor_index);
     else if (type == 6) SendCommand_Type6(motor_index);
     else if (type == 7) SendCommand_Type7(motor_index);
+    else if (type == 8) SendCommand_Type8(motor_index);
 }
 
 void DeviceX::QueryPos(int& motor_index) {
@@ -587,6 +998,7 @@ void DeviceX::QueryPos(int& motor_index) {
     else if (type == 5) QueryPos_Type5(motor_index);
     else if (type == 6) QueryPos_Type6(motor_index);
     else if (type == 7) QueryPos_Type7(motor_index);
+    else if (type == 8) QueryPos_Type8(motor_index);
 }
 
 void DeviceX::QueryVersion(int& motor_index) {
@@ -1238,6 +1650,78 @@ void DeviceX::QueryVersion_Type7(int& motor_index) {
 }
 
 // =========================================================
+//  Type 8 (ENCOS EC-A series)
+// =========================================================
+
+void DeviceX::EnableMotor_Type8(int& motor_index) {
+    const auto& info = (*p_motors_data)[motor_index].info;
+    const encos::CommandFrame release =
+        encos::make_brake_release_command(static_cast<uint32_t>(info.canid));
+    sendStandardFrame(release.can_id, release.data.data(), release.dlc);
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    const encos::CommandFrame current_zero =
+        encos::make_current_zero_command(static_cast<uint32_t>(info.canid));
+    sendStandardFrame(current_zero.can_id, current_zero.data.data(), current_zero.dlc);
+}
+
+void DeviceX::DisableMotor_Type8(int& motor_index) {
+    const auto& info = (*p_motors_data)[motor_index].info;
+    const encos::CommandFrame frame =
+        encos::make_damping_command(static_cast<uint32_t>(info.canid));
+    sendStandardFrame(frame.can_id, frame.data.data(), frame.dlc);
+}
+
+void DeviceX::ClearError_Type8(int& motor_index) {
+    DisableMotor_Type8(motor_index);
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    QueryPos_Type8(motor_index);
+}
+
+void DeviceX::SetZero_Type8(int& motor_index) {
+    (void)motor_index;
+}
+
+void DeviceX::SetMode_Type8(int& motor_index, int mode) {
+    if (mode < 0) mode = 0;
+    if (mode > 3) mode = 3;
+    (*p_motors_data)[motor_index].send.mode = static_cast<uint8_t>(mode);
+}
+
+void DeviceX::SendCommand_Type8(int& motor_index) {
+    const auto& motor = (*p_motors_data)[motor_index];
+    const auto& info = motor.info;
+    const auto& cmd = motor.send;
+    const encos::Limits limits = encos::limits_from_info(info);
+    const uint32_t can_id = static_cast<uint32_t>(info.canid);
+    encos::CommandFrame frame {};
+
+    if (cmd.mode == 0) {
+        frame = encos::make_mit_command(
+            can_id, limits, cmd.position, cmd.speed, cmd.kp, cmd.kd, cmd.torque);
+    } else if (cmd.mode == 1) {
+        frame = encos::make_position_command(
+            can_id, cmd.position, cmd.speed, cmd.torque);
+    } else if (cmd.mode == 2) {
+        frame = encos::make_speed_command(
+            can_id, cmd.speed, cmd.torque);
+    } else {
+        frame = encos::make_torque_command(
+            can_id, limits, cmd.torque);
+    }
+    sendStandardFrame(frame.can_id, frame.data.data(), frame.dlc);
+}
+
+void DeviceX::QueryPos_Type8(int& motor_index) {
+    const auto& info = (*p_motors_data)[motor_index].info;
+    const uint32_t can_id = static_cast<uint32_t>(info.canid);
+    const encos::CommandFrame pos_query = encos::make_query_command(can_id, 1);
+    sendStandardFrame(pos_query.can_id, pos_query.data.data(), pos_query.dlc);
+    std::this_thread::sleep_for(std::chrono::microseconds(100));
+    const encos::CommandFrame speed_query = encos::make_query_command(can_id, 2);
+    sendStandardFrame(speed_query.can_id, speed_query.data.data(), speed_query.dlc);
+}
+
+// =========================================================
 //  Receive Loop
 // =========================================================
 
@@ -1304,7 +1788,7 @@ void DeviceX::ReceiveLoop() {
             } else if (canID >= 0x201 && canID <= 0x208) {
                 parsed_motor_id = canID - 0x200;
             } else if (canID > 0 && canID <= 0xFF) {
-                // PFL28/L28 and Haitai standard frames: CAN ID is node id/device address.
+                // PFL28/L28, Haitai, and ENCOS standard frames: CAN ID is node id/device address.
                 parsed_motor_id = static_cast<int>(canID);
             } else if ((((canID >> 8) & 0x7F) > 0) && ((canID & 0x7F) == 0 || (canID & 0x7F) == 0x7F)) {
                 // HighTorque reply id format: [src(7bit)][dst(7bit)].
@@ -1506,6 +1990,34 @@ void DeviceX::ReceiveLoop() {
             }
 
             motor.recv.motor_id = static_cast<uint8_t>(parsed_motor_id);
+        } else if (motor.info.api_type == 8 && !(frame.can_id & CAN_EFF_FLAG)) {
+            const encos::Feedback feedback = encos::parse_feedback(
+                frame.data, frame_len, encos::limits_from_info(motor.info));
+            if (!feedback.valid) {
+                continue;
+            }
+
+            motor.recv.motor_id = static_cast<uint8_t>(parsed_motor_id);
+            motor.recv.fault_message = feedback.error;
+            if (feedback.has_position) {
+                motor.recv.current_position_f.store(feedback.position_rad);
+            }
+            if (feedback.has_speed) {
+                motor.recv.current_speed_f.store(feedback.speed_rad_s);
+            }
+            if (feedback.has_current) {
+                motor.recv.current_iq_f.store(feedback.current_a);
+                motor.recv.current_torque_f.store(feedback.current_a);
+            }
+            if (feedback.has_temperature) {
+                motor.recv.current_temp_f.store(feedback.temperature_c);
+            }
+            if (feedback.mode != 0) {
+                motor.recv.mode = feedback.mode;
+            }
+            if (feedback.has_state) {
+                motor.recv.motor_state = feedback.state;
+            }
         } else if (motor.info.api_type == 5) {
             if (frame_len < 2) continue;
             const HQTypeAdapt adapt = get_hq_type_adapt(motor.info.type);
