@@ -5,11 +5,57 @@
 
 ## 简介
 `khcan` 是一个基于 ROS 2 `ament_cmake` 的电机/舵机驱动包，主要支持 SocketCAN 电机，同时通过 Type4 接入飞特 TTL 串口舵机。
-当前包会安装可复用驱动库 `libkhcan_driver.so`，其他 ROS 2 工程可直接链接该库进行控制；`main/` 下仅保留少量诊断入口。
+当前包会安装可复用驱动库 `libkhcan_driver.so`，其他 ROS 2 工程可直接链接该库进行控制；也提供单进程整体底层驱动节点 `motor_driver_node`，一次读取完整 `motor.toml`，再按 CAN 通道暴露 `/canX/...` 接口给上层控制。
 当前仓库中可用的入口程序有：
+- `motor_driver_node`：整体底层驱动节点，读取完整 TOML 后统一管理所有电机，并按通道提供 ROS 2 topic/service
 - `show_status`：从 `config/motor.toml` 读取配置，默认只周期性查询所有电机状态；清错、使能、退出失能必须显式加参数
 - `test_mit_mode`：根据 `api_type` 自动切换到 MIT 模式（Type1/2/3/5/8），对单个电机执行正弦摆动测试
 - `test_rs01_speed_swing`：RS01 轮电机走速度模式，其余关节先回零再小幅往复摆动
+
+## 整体底层驱动节点
+推荐用 `motor_driver_node` 作为整机底层驱动入口：
+```bash
+ros2 launch khcan motor_driver.launch.py
+```
+
+节点只创建一个 `BaseRobot` 实例，并一次加载完整 `motor.toml`。随后会根据 TOML 中出现的 `chan` 自动创建通道接口，例如 `chan = 1` 的电机会暴露在 `/can1/...` 下。
+
+每个通道提供同一套接口：
+
+| 接口 | 类型 | 方向 | 说明 |
+|---|---|---|---|
+| `/canX/command` | `sensor_msgs/msg/JointState` | 上层发布 | 发送目标位置/速度/力矩 |
+| `/canX/joint_states` | `sensor_msgs/msg/JointState` | 上层订阅 | 当前通道电机反馈 |
+| `/canX/enable` | `std_srvs/srv/Trigger` | 上层调用 | 使能当前通道全部电机 |
+| `/canX/disable` | `std_srvs/srv/Trigger` | 上层调用 | 失能当前通道全部电机 |
+| `/canX/clear_error` | `std_srvs/srv/Trigger` | 上层调用 | 清除当前通道全部电机错误 |
+| `/canX/set_zero` | `std_srvs/srv/Trigger` | 上层调用 | 设置当前通道全部电机零点 |
+| `/canX/set_mode` | `khcan/srv/SetMotorMode` | 上层调用 | 设置当前通道全部或指定电机模式 |
+
+`/canX/command` 使用 `JointState.name` 匹配 `motor.toml` 中的电机 `name`。推荐上层始终带 `name`，避免通道内顺序变动造成误发：
+```bash
+ros2 topic pub --once /can1/command sensor_msgs/msg/JointState \
+"{name: ['left_hip_pitch_joint'], position: [0.2], velocity: [0.0], effort: [0.0]}"
+```
+
+如果 `name` 为空，则按该通道在 TOML 中的电机顺序匹配数组下标。`position`、`velocity`、`effort` 可只填需要更新的字段，未提供的字段会沿用上一条命令值。
+
+设置模式示例：
+```bash
+ros2 service call /can1/set_mode khcan/srv/SetMotorMode \
+"{names: [], mode: 0}"
+```
+
+`names` 为空表示设置当前通道全部电机；非空时只设置指定名称的电机。
+
+启动参数：
+```bash
+ros2 launch khcan motor_driver.launch.py \
+  config:=/absolute/path/to/motor.toml \
+  rate_hz:=100.0 \
+  auto_enable:=false \
+  default_mode:=-1
+```
 
 ## 当前目录结构
 ```text
@@ -19,18 +65,26 @@ khcan/
 ├── config/
 │   └── motor.toml
 ├── include/
+├── launch/
+│   └── motor_driver.launch.py
 ├── main/
+│   ├── motor_driver_node.cpp
 │   ├── show_status.cpp
 │   ├── test_mit_mode.cpp
 │   └── test_rs01_speed_swing.cpp
+├── srv/
+│   └── SetMotorMode.srv
 └── src/
 ```
 
 ## 代码框架对应关系
+- `main/motor_driver_node.cpp`：整体底层驱动节点；单进程加载完整 TOML，并按 `chan` 暴露 `/canX/...` 接口
 - `main/show_status.cpp`：状态查看入口；默认不清错、不使能、不退出失能
 - `main/test_mit_mode.cpp`：通用 MIT 测试入口，自动适配 Type1/2/3/5/8 的 MIT 模式编号
 - `main/test_rs01_speed_swing.cpp`：RS01 速度模式 + 8 个关节小幅摆动测试入口
 - `config/motor.toml`：电机编号、类型、CAN 通道、CAN ID 与控制参数配置
+- `srv/SetMotorMode.srv`：通道级设置模式服务
+- `launch/motor_driver.launch.py`：整体底层驱动节点启动文件
 - `src/config_loader.cpp`：加载 TOML 配置
 - `src/device.cpp`：SocketCAN 设备收发、海泰协议辅助和飞特 TTL 串口舵机协议接入
 - `src/robot.cpp`：机器人整体控制逻辑
@@ -38,9 +92,17 @@ khcan/
 
 ## 依赖
 ### ROS 2 依赖
-当前包在 `package.xml` 中声明的依赖很少：
+当前包在 `package.xml` 中声明的主要依赖：
 - `ament_cmake`
 - `ament_index_cpp`
+- `rclcpp`
+- `sensor_msgs`
+- `std_srvs`
+- `rosidl_default_generators`
+- `rosidl_default_runtime`
+- `launch`
+- `launch_ros`
+- `ament_index_python`
 
 ### 系统依赖
 代码直接使用 Linux SocketCAN 相关头文件与接口，因此需要：
@@ -156,8 +218,8 @@ config/motor.toml
 |---|---|---|---|
 | `num` | 逻辑编号（业务编号） | 整数 | 否（仅上层标识） |
 | `name` | 电机名称（便于日志识别） | 字符串 | 否 |
-| `type` | 电机/舵机型号名（如 `RS06`、`EC-A4310-P2-36`、`DM8009`、`SCS0037-C001`、`M4438_30`、`PFL28`、`HT3505-J8`） | 字符串 | Type1/3/4/7/8 下用于自动匹配映射范围；Type5 下参与力矩/增益缩放 |
-| `api_type` | 协议类型编号 | `1/2/3/4/5/6/7/8` | 是（决定走哪套协议） |
+| `type` | 电机/舵机型号名（如 `RS06`、`EC-A4310-P2-36`、`DM8009`、`SCS0037-C001`、`M4438_30`、`PFL28`、`HT3505-J8`、`JC`） | 字符串 | Type1/3/4/7/8/9 下用于自动匹配映射范围；Type5 下参与力矩/增益缩放 |
+| `api_type` | 协议类型编号 | `1/2/3/4/5/6/7/8/9` | 是（决定走哪套协议） |
 | `chan` | CAN 通道号 | 正整数，如 `1` | CAN 电机使用，Type4 飞特串口舵机不填 |
 | `port` | 串口设备路径 | 如 `/dev/ttyUSB0` | Type4 飞特串口舵机使用 |
 | `baud` | 串口波特率 | SCS0037 默认 `500000` | Type4 飞特串口舵机使用，可省略 |
@@ -186,36 +248,39 @@ config/motor.toml
 - `6`：Type6（AgiBot PFL28/L28，`pos(float)+current(float)`）
 - `7`：Type7（海泰标准帧协议）
 - `8`：Type8（ENCOS / 因克斯 EC-A 系列标准帧协议）
+- `9`：Type9（JC 系列标准 CAN 舵机协议）
 
 ### 驱动能力确认
-当前清理只删除了独立测试/排障入口，不影响底层电机驱动能力。Type1/2/3/5/6/7/8 仍走 `DeviceX` 的 SocketCAN/CAN FD 路径；Type4 已切换为飞特串口舵机路径，不再使用 SocketCAN。
+当前清理只删除了独立测试/排障入口，不影响底层电机驱动能力。Type1/2/3/5/6/7/8/9 仍走 `DeviceX` 的 SocketCAN/CAN FD 路径；Type4 已切换为飞特串口舵机路径，不再使用 SocketCAN。
 
 | `api_type` | 驱动能力 | 当前诊断入口 |
 |---|---|---|
 | `1` | 保留 Type1 协议发送与反馈解析 | `test_mit_mode` 可用于 MIT 模式简单验证 |
 | `2` | 保留 Type2 协议发送与反馈解析 | `test_mit_mode` 可用于 MIT 模式简单验证 |
 | `3` | 保留 Type3 协议发送与反馈解析 | `test_mit_mode` 可用于 MIT 模式简单验证 |
-| `4` | 飞特 TTL 串口舵机发送与反馈解析，当前内置 `SCS0037-C001` 参数 | `test_feetech_servo` 可用于小幅摆动验证 |
+| `4` | 飞特 TTL 串口舵机发送与反馈解析，当前内置 `SCS0037-C001` 参数 | 推荐通过 `motor_driver_node` 的 `/canX/...` 接口或库 API 控制 |
 | `5` | 保留 Type5 / 高擎 CAN FD 协议发送与反馈解析 | `test_mit_mode` 可用于 MIT 模式简单验证 |
 | `6` | 保留 Type6 / PFL28 协议发送与反馈解析 | 独立 PFL28 诊断入口已删除，请通过库 API 控制 |
-| `7` | 保留 Type7 / 海泰 Rev.3.07b0 标准 CAN 协议发送与反馈解析，含绝对位置和 MIT 模式 | 可通过 `show_status` / `test_haitai_mode` 查看状态 |
+| `7` | 保留 Type7 / 海泰 Rev.3.07b0 标准 CAN 协议发送与反馈解析，含绝对位置和 MIT 模式 | 可通过 `show_status` 或 `motor_driver_node` 查看状态 |
 | `8` | ENCOS / 因克斯 EC-A 系列标准 CAN 协议发送与反馈解析，支持 MIT/位置/速度/力矩 | `test_mit_mode` 可用于 MIT 模式简单验证 |
+| `9` | JC 系列标准 CAN 舵机协议，支持位置/速度/力矩发送和状态回读 | 推荐通过 `motor_driver_node` 的 `/canX/...` 接口控制 |
 
-也就是说，上层仍通过 `BaseRobot::Move_N()` / `BaseRobot::Move()` 进入统一发送路径；CAN 电机按各自 `api_type` 分发到 `DeviceX`，Type4 飞特舵机会分发到串口驱动。
+也就是说，上层可通过 `motor_driver_node` 的通道接口控制整机，也可直接链接库后通过 `BaseRobot::Move_N()` / `BaseRobot::Move()` 进入统一发送路径；CAN 电机按各自 `api_type` 分发到 `DeviceX`，Type4 飞特舵机会分发到串口驱动。
 
 ### 关键说明
 - `chan` 会转换成设备名 `can<chan>`。例如 `chan = 1` 会使用 `can1`；Type4 飞特串口舵机不用 `chan`，改填 `port`。
-- `type` 不参与协议分发（协议分发只看 `api_type`），但在 `api_type=1/3/4/7/8` 时会自动匹配映射范围；在 `api_type=5`（高擎）时会用于型号缩放适配：
+- `type` 不参与协议分发（协议分发只看 `api_type`），但在 `api_type=1/3/4/7/8/9` 时会自动匹配映射范围；在 `api_type=5`（高擎）时会用于型号缩放适配：
   - 力矩发送使用型号补偿（`tqe_adjust` 思路）
   - 力矩回读使用型号还原（`tqe_restore` 思路）
   - MIT 模式的 `kp/kd` 也会做型号补偿
   - 若 `type` 未匹配已知型号，则回退为 `k=1.0,d=0.0`（等价无补偿）
 - `api_type=6`（PFL28）默认将 `send.position` 作为位置命令、`send.torque` 作为电流命令（A）。
 - `api_type=8`（ENCOS / 因克斯 EC-A）使用经典标准 CAN 帧；`SetMode_N()` 支持 `0` MIT 混控、`1` 位置、`2` 速度、`3` 力矩/电流，`send.position/speed/torque/kp/kd` 按 EC-A 型号映射范围打包。
+- `api_type=9`（JC 系列）使用标准 CAN 帧；`SetMode_N()` 支持 `0~5`，其中 `1` 走速度命令、`5` 走力矩命令，其余模式默认按位置命令发送。`type = "JC"` 时会自动给出基础映射范围，`kp_in_use/kd_in_use` 可省略。
 - `api_type=4`（飞特 SCS0037-C001）默认将 `send.position` 按 `0~4.712389rad` 映射到舵机 `0~1023` 位置值；`send.speed` 按 rad/s 转成飞特速度值，填 `0` 表示不限制/由舵机默认处理；`send.torque` 暂不参与飞特位置指令。
 - 修改飞特舵机 ID 前，必须确保总线上只接一个舵机，避免多个出厂默认 `ID=1` 的舵机被同时改成同一个 ID。
 - Type1/3/7/8 的内置型号参数来自 `https://can.robotsfan.com/`：灵足/富兴支持 `RS00`~`RS06`、`CyberGear`；ENCOS/因克斯支持 `EC-A8112-P1-18`、`EC-A4310-P2-36`、`EC-A6408-P2-25`、`EC-A10020-P1-12`、`EC-A10020-P2-24`、`EC-A13715-P1-12.67`、`EC-A13720-P1-11.4`；达妙/达秒支持 `DM4310`、`DM4310_48V`、`DM4340`、`DM4340_48V`、`DM6006`、`DM8006`、`DM8009`、`DM10010L`、`DM10010`、`DMH3510`、`DMH6215`、`DMG6220`。
-- 对 Type1/2/3/4/7/8，`kp_in_use` 和 `kd_in_use` 仍建议显式保留在 TOML 中，便于现场调参；Type4 当前不使用 kp/kd 做闭环控制，但保留字段以兼容统一配置。`p/v/t/kp/kd` 的 `min/max` 可由型号表自动填写，也可以在 TOML 中显式覆盖。
+- 对 Type1/2/3/4/7/8，`kp_in_use` 和 `kd_in_use` 仍建议显式保留在 TOML 中，便于现场调参；Type4 当前不使用 kp/kd 做闭环控制，但保留字段以兼容统一配置。Type9 当前不使用 `kp/kd`，可省略。`p/v/t/kp/kd` 的 `min/max` 可由型号表自动填写，也可以在 TOML 中显式覆盖。
 - `api_type=7`（海泰 Rev.3.07b0）默认将 `send.mode=0` 映射为 `0xC2` 绝对位置控制；`SetMode_N()` 支持 `0` 绝对位置、`1` 电流、`2` 速度、`3` 相对位置、`4` MIT 模式。海泰 `QueryPos` 使用 `0xA4` 复合状态查询，能同时回读位置、速度、电流和温度；驱动层不会在 `Enable_N()` 或 `SetMode_N()` 中自动查询/写入 `0xF0`，只有显式调用 `ConfigureHaitaiMitLimits_N()` 或上层策略时才会发送 `0xF0`。
 - Type7 海泰可在 `type` 中填写具体型号并自动使用 MIT 默认限幅：`HT2205` 为 `95.5rad / 125.66rad/s / 0.06Nm`，`HT3505-J8` 为 `95.5rad / 32.04rad/s / 0.85Nm`，`HT4305` / `HT4305-J10` 为 `95.5rad / 41.89rad/s / 3.0Nm`，`HT4310-J10` 为 `95.5rad / 31.42rad/s / 1.0Nm`，`HT6010-J6` 为 `95.5rad / 70.16rad/s / 9.0Nm`。未知型号回退到协议默认 `95.5rad / 45rad/s / 18Nm`；TOML 中显式填写的 `p/v/t/kp/kd` 字段始终优先覆盖内置默认值。
 - `p/v/t/kp/kd` 的 `min/max` 既用于发送映射，也用于接收反解（不同 `api_type` 有差异，但都依赖这些边界）。
@@ -242,6 +307,8 @@ PFL28（位置+电流控制）：{num = 11, name = "R_PUSHROD", type = "PFL28", 
 
 飞特 SCS0037-C001（Type4 串口舵机，不走 SocketCAN）：{num = 31, name = "FT_SERVO_1", type = "SCS0037-C001", api_type = 4, port = "/dev/ttyUSB0", baud = 500000, canid = 1, kp_in_use = 0.0, kd_in_use = 0.0, pos_min = 0.0, pos_max = 4.712389}
 
+JC 系列（Type9 标准 CAN 舵机）：{num = 41, name = "JC_SERVO_1", type = "JC", api_type = 9, chan = 1, canid = 1, pos_min = -1.5708, pos_max = 1.5708}
+
 ## 编译
 建议在工作区根目录执行：
 ```bash
@@ -253,7 +320,9 @@ source install/setup.bash
 - `lib/libkhcan_driver.so`：可被其他工程链接的驱动库
 - `include/*.hpp`：公开头文件
 - `share/khcan/config/motor.toml`：默认配置文件
+- `share/khcan/launch/motor_driver.launch.py`：整体底层驱动启动文件
 - `ros2 run khcan show_status`
+- `ros2 run khcan motor_driver_node`
 - `ros2 run khcan test_mit_mode`
 - `ros2 run khcan test_rs01_speed_swing`
 
@@ -298,7 +367,21 @@ source install/setup.bash
 ```
 
 ## 运行
-当前仓库没有 `launch` 文件，直接运行可执行程序即可：
+推荐启动整体底层驱动节点：
+```bash
+ros2 launch khcan motor_driver.launch.py
+```
+
+也可以直接运行节点：
+```bash
+ros2 run khcan motor_driver_node --ros-args \
+  -p config:=/absolute/path/to/motor.toml \
+  -p rate_hz:=100.0 \
+  -p auto_enable:=false \
+  -p default_mode:=-1
+```
+
+诊断工具仍可单独运行：
 ```bash
 ros2 run khcan show_status
 ros2 run khcan test_mit_mode
@@ -370,7 +453,6 @@ ros2 run khcan show_status --clear-errors --enable
 - `yesense_interface` / `yesense_std_ros2`
 - `remote` 遥控模块源码
 - `demo_socketcan` 节点
-- `launch` 启动文件
 - `setup_can_from_toml.sh` 脚本
 
 ## 常见问题

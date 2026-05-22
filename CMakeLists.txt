@@ -13,7 +13,15 @@ add_compile_options(-Wall -Wextra)
 
 find_package(ament_cmake REQUIRED)
 find_package(ament_index_cpp REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(rosidl_default_generators REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
 find_package(Threads REQUIRED)
+
+rosidl_generate_interfaces(${PROJECT_NAME}
+  "srv/SetMotorMode.srv"
+)
 
 set(KHCAN_DRIVER_SRCS
   src/config_loader.cpp
@@ -53,6 +61,23 @@ foreach(tool ${KHCAN_TOOL_TARGETS})
   )
 endforeach()
 
+add_executable(motor_driver_node
+  main/motor_driver_node.cpp
+)
+target_link_libraries(motor_driver_node
+  khcan_driver
+)
+ament_target_dependencies(motor_driver_node
+  ament_index_cpp
+  rclcpp
+  sensor_msgs
+  std_srvs
+)
+rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
+target_link_libraries(motor_driver_node
+  "${cpp_typesupport_target}"
+)
+
 install(TARGETS khcan_driver
   EXPORT export_khcan_driver
   ARCHIVE DESTINATION lib
@@ -65,6 +90,10 @@ install(TARGETS ${KHCAN_TOOL_TARGETS}
   DESTINATION lib/${PROJECT_NAME}
 )
 
+install(TARGETS motor_driver_node
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 install(DIRECTORY include/
   DESTINATION include
 )
@@ -73,9 +102,13 @@ install(DIRECTORY config/
   DESTINATION share/${PROJECT_NAME}/config
 )
 
+install(DIRECTORY launch/
+  DESTINATION share/${PROJECT_NAME}/launch
+)
+
 ament_export_targets(export_khcan_driver HAS_LIBRARY_TARGET)
 ament_export_include_directories(include)
 ament_export_libraries(khcan_driver)
-ament_export_dependencies(Threads)
+ament_export_dependencies(rosidl_default_runtime Threads)
 
 ament_package()

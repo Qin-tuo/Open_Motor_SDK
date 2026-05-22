@@ -230,4 +230,13 @@ private:
     bool SetMode_Type8(int& motor_index, int mode);
     bool SendCommand_Type8(int& motor_index);
     bool QueryPos_Type8(int& motor_index);
+
+    // Type 9 (JC CAN servo)
+    bool EnableMotor_Type9(int& motor_index);
+    bool DisableMotor_Type9(int& motor_index);
+    void ClearError_Type9(int& motor_index);
+    void SetZero_Type9(int& motor_index);
+    bool SetMode_Type9(int& motor_index, int mode);
+    bool SendCommand_Type9(int& motor_index);
+    bool QueryPos_Type9(int& motor_index);
 };

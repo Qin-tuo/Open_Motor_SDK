@@ -600,6 +600,62 @@ int feetech_read_be_u16(const uint8_t* data) {
     return (static_cast<int>(data[0]) << 8) | static_cast<int>(data[1]);
 }
 
+float jc_rad_to_deg_x100(float rad) {
+    constexpr float kRadToDeg = 57.2957795f;
+    return rad * kRadToDeg * 100.0f;
+}
+
+float jc_deg_x100_to_rad(int32_t raw) {
+    constexpr float kDegToRad = 0.017453293f;
+    return static_cast<float>(raw) * 0.01f * kDegToRad;
+}
+
+void jc_write_be_i32(uint8_t* dst, int32_t value) {
+    const uint32_t raw = static_cast<uint32_t>(value);
+    dst[0] = static_cast<uint8_t>((raw >> 24) & 0xFF);
+    dst[1] = static_cast<uint8_t>((raw >> 16) & 0xFF);
+    dst[2] = static_cast<uint8_t>((raw >> 8) & 0xFF);
+    dst[3] = static_cast<uint8_t>(raw & 0xFF);
+}
+
+int32_t jc_read_be_i32(const uint8_t* src) {
+    const uint32_t raw = (static_cast<uint32_t>(src[0]) << 24) |
+                         (static_cast<uint32_t>(src[1]) << 16) |
+                         (static_cast<uint32_t>(src[2]) << 8) |
+                         static_cast<uint32_t>(src[3]);
+    return static_cast<int32_t>(raw);
+}
+
+void make_jc_write16(uint8_t* data, uint16_t reg, uint16_t value) {
+    data[0] = 0x2B;
+    data[1] = static_cast<uint8_t>((reg >> 8) & 0xFF);
+    data[2] = static_cast<uint8_t>(reg & 0xFF);
+    data[3] = 0x00;
+    data[4] = static_cast<uint8_t>((value >> 8) & 0xFF);
+    data[5] = static_cast<uint8_t>(value & 0xFF);
+    data[6] = 0x00;
+    data[7] = 0x00;
+}
+
+void make_jc_write32(uint8_t* data, uint16_t reg, int32_t value) {
+    data[0] = 0x23;
+    data[1] = static_cast<uint8_t>((reg >> 8) & 0xFF);
+    data[2] = static_cast<uint8_t>(reg & 0xFF);
+    data[3] = 0x00;
+    jc_write_be_i32(&data[4], value);
+}
+
+void make_jc_read32(uint8_t* data, uint16_t reg) {
+    data[0] = 0x43;
+    data[1] = static_cast<uint8_t>((reg >> 8) & 0xFF);
+    data[2] = static_cast<uint8_t>(reg & 0xFF);
+    data[3] = 0x00;
+    data[4] = 0x00;
+    data[5] = 0x00;
+    data[6] = 0x00;
+    data[7] = 0x00;
+}
+
 }  // namespace
 
 HaitaiCommandFrame build_haitai_command(uint8_t mode, float position_rad,
@@ -1696,6 +1752,7 @@ bool DeviceX::EnableMotor(int& motor_index) {
     else if (type == 6) return EnableMotor_Type6(motor_index);
     else if (type == 7) return EnableMotor_Type7(motor_index);
     else if (type == 8) return EnableMotor_Type8(motor_index);
+    else if (type == 9) return EnableMotor_Type9(motor_index);
     return false;
 }
 
@@ -1711,6 +1768,7 @@ bool DeviceX::DisableMotor(int& motor_index) {
     else if (type == 6) return DisableMotor_Type6(motor_index);
     else if (type == 7) return DisableMotor_Type7(motor_index);
     else if (type == 8) return DisableMotor_Type8(motor_index);
+    else if (type == 9) return DisableMotor_Type9(motor_index);
     return false;
 }
 
@@ -1726,6 +1784,7 @@ void DeviceX::ClearError(int& motor_index) {
     else if (type == 6) ClearError_Type6(motor_index);
     else if (type == 7) ClearError_Type7(motor_index);
     else if (type == 8) ClearError_Type8(motor_index);
+    else if (type == 9) ClearError_Type9(motor_index);
 }
 
 void DeviceX::SetZero(int& motor_index) {
@@ -1740,6 +1799,7 @@ void DeviceX::SetZero(int& motor_index) {
     else if (type == 6) SetZero_Type6(motor_index);
     else if (type == 7) SetZero_Type7(motor_index);
     else if (type == 8) SetZero_Type8(motor_index);
+    else if (type == 9) SetZero_Type9(motor_index);
 }
 
 bool DeviceX::SetMode(int& motor_index, int mode) {
@@ -1754,6 +1814,7 @@ bool DeviceX::SetMode(int& motor_index, int mode) {
     else if (type == 6) return SetMode_Type6(motor_index, mode);
     else if (type == 7) return SetMode_Type7(motor_index, mode);
     else if (type == 8) return SetMode_Type8(motor_index, mode);
+    else if (type == 9) return SetMode_Type9(motor_index, mode);
     return false;
 }
 
@@ -1772,6 +1833,7 @@ bool DeviceX::SendCommand(int& motor_index) {
     else if (type == 6) return SendCommand_Type6(motor_index);
     else if (type == 7) return SendCommand_Type7(motor_index);
     else if (type == 8) return SendCommand_Type8(motor_index);
+    else if (type == 9) return SendCommand_Type9(motor_index);
     return false;
 }
 
@@ -1787,6 +1849,7 @@ bool DeviceX::QueryPos(int& motor_index) {
     else if (type == 6) return QueryPos_Type6(motor_index);
     else if (type == 7) return QueryPos_Type7(motor_index);
     else if (type == 8) return QueryPos_Type8(motor_index);
+    else if (type == 9) return QueryPos_Type9(motor_index);
     return false;
 }
 
@@ -2598,6 +2661,100 @@ bool DeviceX::QueryPos_Type8(int& motor_index) {
 }
 
 // =========================================================
+//  Type 9 (JC CAN servo)
+// =========================================================
+
+bool DeviceX::EnableMotor_Type9(int& motor_index) {
+    auto& motor = (*p_motors_data)[motor_index];
+    const auto& info = motor.info;
+    uint8_t data[8] = {0};
+
+    const uint8_t mode = (motor.send.mode <= 5) ? motor.send.mode : 4;
+    make_jc_write16(data, 0x0060, mode == 0 ? 4 : mode);
+    const bool mode_sent = sendStandardFrame(0x600U + static_cast<uint32_t>(info.canid), data, sizeof(data));
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+
+    make_jc_write16(data, 0x00A2, 1);
+    const bool enable_sent = sendStandardFrame(0x600U + static_cast<uint32_t>(info.canid), data, sizeof(data));
+    if (mode_sent && enable_sent) {
+        motor.recv.motor_state = 1;
+    }
+    return mode_sent && enable_sent;
+}
+
+bool DeviceX::DisableMotor_Type9(int& motor_index) {
+    auto& motor = (*p_motors_data)[motor_index];
+    const auto& info = motor.info;
+    uint8_t data[8] = {0};
+
+    make_jc_write16(data, 0x00A0, 1);
+    const bool sent = sendStandardFrame(0x600U + static_cast<uint32_t>(info.canid), data, sizeof(data));
+    if (sent) {
+        motor.recv.motor_state = 0;
+    }
+    return sent;
+}
+
+void DeviceX::ClearError_Type9(int& motor_index) {
+    auto& motor = (*p_motors_data)[motor_index];
+    const auto& info = motor.info;
+    uint8_t data[8] = {0};
+
+    make_jc_read32(data, 0x000C);
+    sendStandardFrame(0x600U + static_cast<uint32_t>(info.canid), data, sizeof(data));
+    motor.recv.fault_message = 0;
+}
+
+void DeviceX::SetZero_Type9(int& motor_index) {
+    const auto& info = (*p_motors_data)[motor_index].info;
+    uint8_t data[8] = {0};
+
+    make_jc_write16(data, 0x00A7, 1);
+    sendStandardFrame(0x600U + static_cast<uint32_t>(info.canid), data, sizeof(data));
+}
+
+bool DeviceX::SetMode_Type9(int& motor_index, int mode) {
+    if (mode < 0) mode = 4;
+    if (mode > 5) mode = 5;
+    auto& motor = (*p_motors_data)[motor_index];
+    motor.send.mode = static_cast<uint8_t>(mode);
+
+    const auto& info = motor.info;
+    uint8_t data[8] = {0};
+    make_jc_write16(data, 0x0060, static_cast<uint16_t>(mode));
+    return sendStandardFrame(0x600U + static_cast<uint32_t>(info.canid), data, sizeof(data));
+}
+
+bool DeviceX::SendCommand_Type9(int& motor_index) {
+    const auto& motor = (*p_motors_data)[motor_index];
+    const auto& info = motor.info;
+    const auto& cmd = motor.send;
+    uint8_t data[8] = {0};
+
+    if (cmd.mode == 0 || cmd.mode == 2 || cmd.mode == 3 || cmd.mode == 4) {
+        const int32_t pos_raw = static_cast<int32_t>(std::lround(jc_rad_to_deg_x100(cmd.position)));
+        make_jc_write32(data, 0x0023, pos_raw);
+    } else if (cmd.mode == 1) {
+        const float rpm = cmd.speed * 60.0f / TWO_PI;
+        const int32_t speed_raw = static_cast<int32_t>(std::lround(rpm * 100.0f));
+        make_jc_write32(data, 0x0021, speed_raw);
+    } else {
+        const int16_t torque_raw = static_cast<int16_t>(std::lround(cmd.torque * 100.0f));
+        make_jc_write16(data, 0x0020, static_cast<uint16_t>(torque_raw));
+    }
+
+    return sendStandardFrame(0x600U + static_cast<uint32_t>(info.canid), data, sizeof(data));
+}
+
+bool DeviceX::QueryPos_Type9(int& motor_index) {
+    const auto& info = (*p_motors_data)[motor_index].info;
+    uint8_t data[8] = {0};
+
+    make_jc_read32(data, 0x0008);
+    return sendStandardFrame(0x600U + static_cast<uint32_t>(info.canid), data, sizeof(data));
+}
+
+// =========================================================
 //  Receive Loop
 // =========================================================
 
@@ -2667,6 +2824,8 @@ void DeviceX::ReceiveLoop() {
                 parsed_motor_id = static_cast<int>(canID & 0xFFU);
             } else if (canID >= 0x201 && canID <= 0x208) {
                 parsed_motor_id = canID - 0x200;
+            } else if (canID >= 0x581 && canID <= 0x5FF) {
+                parsed_motor_id = canID - 0x580;
             } else if (canID > 0 && canID <= 0xFF) {
                 // PFL28/L28, Haitai, and ENCOS standard frames: CAN ID is node id/device address.
                 parsed_motor_id = static_cast<int>(canID);
@@ -2913,6 +3072,31 @@ void DeviceX::ReceiveLoop() {
             if (feedback.has_state) {
                 motor.recv.motor_state = feedback.state;
             }
+        } else if (motor.info.api_type == 9 && !(frame.can_id & CAN_EFF_FLAG) && frame_len >= 8) {
+            const uint16_t reg = static_cast<uint16_t>(
+                (static_cast<uint16_t>(frame.data[1]) << 8) | frame.data[2]);
+
+            motor.recv.motor_id = static_cast<uint8_t>(parsed_motor_id);
+            motor.recv.motor_state = 1;
+            if (reg == 0x0008 || reg == 0x0023) {
+                const int32_t pos_raw = jc_read_be_i32(&frame.data[4]);
+                motor.recv.current_position_f.store(jc_deg_x100_to_rad(pos_raw));
+                motor.recv.mode = motor.send.mode;
+                motor.recv.fault_message = 0;
+            } else if (reg == 0x0021) {
+                const int32_t speed_raw = jc_read_be_i32(&frame.data[4]);
+                const float rpm = static_cast<float>(speed_raw) * 0.01f;
+                motor.recv.current_speed_f.store(rpm * TWO_PI / 60.0f);
+            } else if (reg == 0x0020) {
+                const int16_t tq_raw = static_cast<int16_t>(
+                    (static_cast<uint16_t>(frame.data[4]) << 8) | frame.data[5]);
+                motor.recv.current_torque_f.store(static_cast<float>(tq_raw) * 0.01f);
+            } else if (reg == 0x000C) {
+                motor.recv.fault_message = frame.data[7];
+            } else if (reg == 0x0060) {
+                motor.recv.mode = frame.data[5];
+            }
+            motor.recv.feedback_sequence.fetch_add(1, std::memory_order_relaxed);
         } else if (motor.info.api_type == 5) {
             if (frame_len < 2) continue;
             const HQTypeAdapt adapt = get_hq_type_adapt(motor.info.type);

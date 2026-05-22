@@ -97,6 +97,14 @@ bool get_feetech_model_defaults(const std::string& key, MotorModelDefaults& out)
     return false;
 }
 
+bool get_jc_model_defaults(const std::string& key, MotorModelDefaults& out) {
+    if (key_is(key, {"JC", "JC_SERVO", "JC-SERVO", "JC_SERIES", "JC-SERIES"})) {
+        out = make_symmetric_defaults(1.5707964f, 12.566371f, 0.0f, 0.0f, 1.0f);
+        return true;
+    }
+    return false;
+}
+
 bool get_model_defaults(int api_type, const std::string& type, MotorModelDefaults& out) {
     const std::string key = normalize_model_name(type);
     if (api_type == 1) return get_robstride_model_defaults(key, out);
@@ -104,6 +112,7 @@ bool get_model_defaults(int api_type, const std::string& type, MotorModelDefault
     if (api_type == 3) return get_dm_model_defaults(key, out);
     if (api_type == 4) return get_feetech_model_defaults(key, out);
     if (api_type == 7) return get_haitai_model_defaults(key, out);
+    if (api_type == 9) return get_jc_model_defaults(key, out);
     return false;
 }
 
@@ -122,7 +131,8 @@ void apply_model_defaults(Motor_CAN_Info_Struct& motor, const MotorModelDefaults
 
 bool supports_required_model_defaults(int api_type) {
     return api_type == 1 || api_type == 2 || api_type == 3 ||
-           api_type == 4 || api_type == 7 || api_type == 8;
+           api_type == 4 || api_type == 7 || api_type == 8 ||
+           api_type == 9;
 }
 
 }  // namespace
@@ -247,6 +257,10 @@ std::vector<Motor_CAN_Info_Struct> MotorConfigLoader::loadConfig(const std::stri
             m.kp_in_use = 0.0f; m.kd_in_use = 0.0f;
             m.pos_min = 0.0f; m.pos_max = 9.5f;
         }
+        if (m.api_type == 9) {
+            m.kp_in_use = 0.0f;
+            m.kd_in_use = 0.0f;
+        }
 
         bool has_model_defaults = false;
         if (supports_required_model_defaults(m.api_type)) {
@@ -272,8 +286,10 @@ std::vector<Motor_CAN_Info_Struct> MotorConfigLoader::loadConfig(const std::stri
             get_val(m.kd_max, "kd_max", false);
             get_val(m.t_min, "t_min", false);
             get_val(m.t_max, "t_max", false);
-            get_val(m.kp_in_use, "kp_in_use", supports_required_model_defaults(m.api_type));
-            get_val(m.kd_in_use, "kd_in_use", supports_required_model_defaults(m.api_type));
+            const bool gains_required = supports_required_model_defaults(m.api_type) &&
+                m.api_type != 9;
+            get_val(m.kp_in_use, "kp_in_use", gains_required);
+            get_val(m.kd_in_use, "kd_in_use", gains_required);
             get_val(m.pos_min, "pos_min", false);
             get_val(m.pos_max, "pos_max", false);
 
