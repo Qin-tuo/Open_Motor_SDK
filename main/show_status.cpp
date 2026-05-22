@@ -1,67 +1,168 @@
 #include "robot.hpp"
-#include <vector>
-#include <iostream>
-#include <thread>
-#include <chrono>
+
 #include <ament_index_cpp/get_package_share_directory.hpp>
 
-int main() {
-    // 1. 初始化机器人
-    std::string package_share_directory = ament_index_cpp::get_package_share_directory("khcan");
-    std::string toml_path = package_share_directory + "/config/motor.toml";
-    const std::string config_path = toml_path;
-    BaseRobot robot(config_path);
+#include <chrono>
+#include <cstdint>
+#include <cstdlib>
+#include <filesystem>
+#include <iostream>
+#include <stdexcept>
+#include <string>
+#include <thread>
 
-    robot.DisableAll(); // 启动时先关闭所有电机，确保安全
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+namespace {
 
-    // robot.SetZero_All();
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+void printUsage(const char* argv0) {
+    std::cout
+        << "Usage: " << argv0 << " [options] [motor.toml]\n"
+        << "\n"
+        << "Default mode is status query only: no disable, no clear-error, no enable.\n"
+        << "\n"
+        << "Options:\n"
+        << "  --resolve-config-only   Print resolved config path and exit without opening CAN\n"
+        << "  --hz <value>            Query/print rate, default 10\n"
+        << "  --clear-errors          Send clear-error before monitoring\n"
+        << "  --enable                Send enable before monitoring\n"
+        << "  --disable-first         Send disable before monitoring\n"
+        << "  --disable-on-exit       Send disable when exiting\n"
+        << "  --help                  Show this message\n";
+}
 
-    // 2. 清除错误 (建议启动时执行一次)
-    robot.ClearError_All();
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+std::string defaultConfigPath() {
+    if (const char* env_path = std::getenv("KHCAN_CONFIG_PATH")) {
+        if (env_path[0] != '\0') {
+            return env_path;
+        }
+    }
 
-    // 【选项】是否使能电机？
-    robot.EnableAll(); 
+    try {
+        const std::string package_share_directory =
+            ament_index_cpp::get_package_share_directory("khcan");
+        return package_share_directory + "/config/motor.toml";
+    } catch (const std::exception&) {
+        const std::filesystem::path local_motor_driver =
+            "src/motor_driver/config/motor.toml";
+        if (std::filesystem::exists(local_motor_driver)) {
+            return local_motor_driver.string();
+        }
+        const std::filesystem::path local_khcan = "src/khcan/config/motor.toml";
+        if (std::filesystem::exists(local_khcan)) {
+            return local_khcan.string();
+        }
+        throw;
+    }
+}
 
-    
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+double parsePositiveDouble(const std::string& value, const std::string& option_name) {
+    const double parsed = std::stod(value);
+    if (!(parsed > 0.0)) {
+        throw std::invalid_argument(option_name + " must be > 0");
+    }
+    return parsed;
+}
 
-    // ================= 配置区域 =================
-    double target_hz = 50.0;  // <--- 修改这里来调整频率 (例如 1.0, 10.0, 50.0)
-    // ===========================================
+}  // namespace
 
-    // 计算周期 (微秒)，例如 10Hz -> 100000us
-    auto period_duration = std::chrono::microseconds(static_cast<int64_t>(1000000.0 / target_hz));
+int main(int argc, char** argv) {
+    bool resolve_config_only = false;
+    bool clear_errors = false;
+    bool enable = false;
+    bool disable_first = false;
+    bool disable_on_exit = false;
+    double target_hz = 10.0;
+    std::string config_path;
+
+    try {
+        for (int i = 1; i < argc; ++i) {
+            const std::string arg = argv[i];
+            if (arg == "--help" || arg == "-h") {
+                printUsage(argv[0]);
+                return 0;
+            }
+            if (arg == "--resolve-config-only") {
+                resolve_config_only = true;
+                continue;
+            }
+            if (arg == "--clear-errors") {
+                clear_errors = true;
+                continue;
+            }
+            if (arg == "--enable") {
+                enable = true;
+                continue;
+            }
+            if (arg == "--disable-first") {
+                disable_first = true;
+                continue;
+            }
+            if (arg == "--disable-on-exit") {
+                disable_on_exit = true;
+                continue;
+            }
+            if (arg == "--hz") {
+                if (i + 1 >= argc) {
+                    throw std::invalid_argument("--hz requires a value");
+                }
+                target_hz = parsePositiveDouble(argv[++i], "--hz");
+                continue;
+            }
+            if (!arg.empty() && arg[0] == '-') {
+                throw std::invalid_argument("unknown option: " + arg);
+            }
+            if (!config_path.empty()) {
+                throw std::invalid_argument("multiple config paths were provided");
+            }
+            config_path = arg;
+        }
+
+        if (config_path.empty()) {
+            config_path = defaultConfigPath();
+        }
+    } catch (const std::exception& ex) {
+        std::cerr << "[show_status] argument error: " << ex.what() << std::endl;
+        printUsage(argv[0]);
+        return 2;
+    }
+
+    std::cout << "[show_status] config: " << config_path << std::endl;
+    if (resolve_config_only) {
+        return 0;
+    }
+
+    BaseRobot robot(config_path, disable_on_exit);
+
+    if (disable_first) {
+        robot.DisableAll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    if (clear_errors) {
+        robot.ClearError_All();
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    if (enable) {
+        robot.EnableAll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+
+    const auto period_duration =
+        std::chrono::microseconds(static_cast<int64_t>(1000000.0 / target_hz));
 
     std::cout << "=== Robot Position Monitor (" << target_hz << "Hz) ===" << std::endl;
-    std::cout << " loop... Press Ctrl+C to exit." << std::endl;
+    std::cout << "query-only by default; Press Ctrl+C to exit." << std::endl;
 
-    while(true) {
-        // 记录循环开始时间
-        auto start_time = std::chrono::steady_clock::now();
+    while (true) {
+        const auto start_time = std::chrono::steady_clock::now();
 
-        // [关键步骤] 发送查询指令
         robot.QueryPos_ALL();
-
-        // 等待总线回传数据 (给一点点固定延时让CAN线程处理接收，防止 Query 和 Print 挨太紧)
-        // 注意：如果频率很高(如 >100Hz)，这个固定延时可能需要减小
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
-
-        // [打印状态]
         robot.PrintStatus();
 
-        // --- 智能频率控制 ---
-        auto end_time = std::chrono::steady_clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
-        
-        // 计算还需要休眠多久才能达到目标频率
+        const auto end_time = std::chrono::steady_clock::now();
+        const auto elapsed =
+            std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
         if (elapsed < period_duration) {
             std::this_thread::sleep_for(period_duration - elapsed);
-        } else {
-            // 如果执行时间已经超过了周期，就不休眠了，直接进下一次（防止阻塞）
-            // std::cerr << "[Warning] Loop too slow for target Hz!" << std::endl;
         }
     }
 

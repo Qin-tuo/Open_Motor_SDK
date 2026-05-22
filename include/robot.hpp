@@ -6,6 +6,7 @@
 #include "types.hpp"
 
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -17,20 +18,25 @@ struct MotorCmdVec {
 
 class BaseRobot {
 private:
+    bool disable_on_destroy_ = true;
+
     inline float Clip(float val, float min, float max) {
         if (min >= max) return val;
         return (val < min) ? min : ((val > max) ? max : val);
     }
 
 public:
-    explicit BaseRobot(const std::string& config_file);
+    explicit BaseRobot(const std::string& config_file, bool disable_on_destroy = true);
+    BaseRobot(const std::string& config_file,
+              bool disable_on_destroy,
+              const std::vector<std::string>& active_motor_names);
     ~BaseRobot();
 
     void EnableAll();
     void DisableAll();
 
-    void Enable_N(int N);
-    void Disable_N(int N);
+    bool Enable_N(int N);
+    bool Disable_N(int N);
     int SetKpd_N(float kp, float kd, int N);
     void SetKpd_all(float kp, float kd);
 
@@ -39,16 +45,20 @@ public:
     void ClearError_All();
     void SetZero_All();
 
-    void Move_N(int N, const MotorCmdVec& target);
-    void Move(const std::vector<MotorCmdVec>& targets);
+    bool Stage_N(int N, const MotorCmdVec& target);
+    bool Flush_N(int N);
+    bool Move_N(int N, const MotorCmdVec& target);
+    bool Move(const std::vector<MotorCmdVec>& targets);
 
     void SetModes(std::vector<int>& modes);
-    void SetMode_N(int N, int mode);
+    bool SetMode_N(int N, int mode);
+    bool ConfigureHaitaiMitLimits_N(int N);
     void SetModeAll_TypeX(int X, int mode);
 
     void QueryPos_ALL();
-    void QueryPos_N(int N);
+    bool QueryPos_N(int N);
     void QueryVersion_N(int N);
+    int FindMotorIndexByName(const std::string& name) const;
     bool IsMotorReady(int N) const;
 
     void PrintStatus();

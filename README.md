@@ -7,7 +7,7 @@
 `khcan` 是一个基于 ROS 2 `ament_cmake` 的电机/舵机驱动包，主要支持 SocketCAN 电机，同时通过 Type4 接入飞特 TTL 串口舵机。
 当前包会安装可复用驱动库 `libkhcan_driver.so`，其他 ROS 2 工程可直接链接该库进行控制；`main/` 下仅保留少量诊断入口。
 当前仓库中可用的入口程序有：
-- `show_status`：从 `config/motor.toml` 读取配置，初始化并周期性查询所有电机状态
+- `show_status`：从 `config/motor.toml` 读取配置，默认只周期性查询所有电机状态；清错、使能、退出失能必须显式加参数
 - `test_mit_mode`：根据 `api_type` 自动切换到 MIT 模式（Type1/2/3/5/8），对单个电机执行正弦摆动测试
 - `test_rs01_speed_swing`：RS01 轮电机走速度模式，其余关节先回零再小幅往复摆动
 
@@ -27,7 +27,7 @@ khcan/
 ```
 
 ## 代码框架对应关系
-- `main/show_status.cpp`：程序入口，执行初始化、清错、使能和状态打印循环
+- `main/show_status.cpp`：状态查看入口；默认不清错、不使能、不退出失能
 - `main/test_mit_mode.cpp`：通用 MIT 测试入口，自动适配 Type1/2/3/5/8 的 MIT 模式编号
 - `main/test_rs01_speed_swing.cpp`：RS01 速度模式 + 8 个关节小幅摆动测试入口
 - `config/motor.toml`：电机编号、类型、CAN 通道、CAN ID 与控制参数配置
@@ -216,8 +216,8 @@ config/motor.toml
 - 修改飞特舵机 ID 前，必须确保总线上只接一个舵机，避免多个出厂默认 `ID=1` 的舵机被同时改成同一个 ID。
 - Type1/3/7/8 的内置型号参数来自 `https://can.robotsfan.com/`：灵足/富兴支持 `RS00`~`RS06`、`CyberGear`；ENCOS/因克斯支持 `EC-A8112-P1-18`、`EC-A4310-P2-36`、`EC-A6408-P2-25`、`EC-A10020-P1-12`、`EC-A10020-P2-24`、`EC-A13715-P1-12.67`、`EC-A13720-P1-11.4`；达妙/达秒支持 `DM4310`、`DM4310_48V`、`DM4340`、`DM4340_48V`、`DM6006`、`DM8006`、`DM8009`、`DM10010L`、`DM10010`、`DMH3510`、`DMH6215`、`DMG6220`。
 - 对 Type1/2/3/4/7/8，`kp_in_use` 和 `kd_in_use` 仍建议显式保留在 TOML 中，便于现场调参；Type4 当前不使用 kp/kd 做闭环控制，但保留字段以兼容统一配置。`p/v/t/kp/kd` 的 `min/max` 可由型号表自动填写，也可以在 TOML 中显式覆盖。
-- `api_type=7`（海泰 Rev.3.07b0）默认将 `send.mode=0` 映射为 `0xC2` 绝对位置控制；`SetMode_N()` 支持 `0` 绝对位置、`1` 电流、`2` 速度、`3` 相对位置、`4` MIT 模式。海泰 `QueryPos` 使用 `0xA4` 复合状态查询，能同时回读位置、速度、电流和温度；使能时会额外查询 `0xF0` MIT 限幅，进入 `mode=4` 时驱动会用当前配置通过 `0xF0` 同步 MIT 限幅到驱动板。
-- Type7 海泰可在 `type` 中填写具体型号并自动使用 MIT 默认限幅：`HT2205` 为 `95.5rad / 125.66rad/s / 0.06Nm`，`HT3505-J8` 为 `95.5rad / 32.04rad/s / 0.85Nm`，`HT4305` / `HT4305-J10` 为 `95.5rad / 41.89rad/s / 3.0Nm`，`HT4310-J10` 为 `95.5rad / 31.42rad/s / 5.8Nm`，`HT6010-J6` 为 `95.5rad / 70.16rad/s / 9.0Nm`。未知型号回退到协议默认 `95.5rad / 45rad/s / 18Nm`；TOML 中显式填写的 `p/v/t/kp/kd` 字段始终优先覆盖内置默认值。进入 `mode=4` 时驱动会用当前配置通过 `0xF0` 同步 MIT 限幅到驱动板。
+- `api_type=7`（海泰 Rev.3.07b0）默认将 `send.mode=0` 映射为 `0xC2` 绝对位置控制；`SetMode_N()` 支持 `0` 绝对位置、`1` 电流、`2` 速度、`3` 相对位置、`4` MIT 模式。海泰 `QueryPos` 使用 `0xA4` 复合状态查询，能同时回读位置、速度、电流和温度；驱动层不会在 `Enable_N()` 或 `SetMode_N()` 中自动查询/写入 `0xF0`，只有显式调用 `ConfigureHaitaiMitLimits_N()` 或上层策略时才会发送 `0xF0`。
+- Type7 海泰可在 `type` 中填写具体型号并自动使用 MIT 默认限幅：`HT2205` 为 `95.5rad / 125.66rad/s / 0.06Nm`，`HT3505-J8` 为 `95.5rad / 32.04rad/s / 0.85Nm`，`HT4305` / `HT4305-J10` 为 `95.5rad / 41.89rad/s / 3.0Nm`，`HT4310-J10` 为 `95.5rad / 31.42rad/s / 1.0Nm`，`HT6010-J6` 为 `95.5rad / 70.16rad/s / 9.0Nm`。未知型号回退到协议默认 `95.5rad / 45rad/s / 18Nm`；TOML 中显式填写的 `p/v/t/kp/kd` 字段始终优先覆盖内置默认值。
 - `p/v/t/kp/kd` 的 `min/max` 既用于发送映射，也用于接收反解（不同 `api_type` 有差异，但都依赖这些边界）。
 - `kp_in_use`、`kd_in_use` 会在初始化时拷贝到每个电机的发送缓存，后续可再通过接口动态修改。
 - `pos_min`、`pos_max` 用于 `Move/Move_N` 的发送前限幅；若 `pos_min >= pos_max`，限幅逻辑会被跳过（等价于不启用软限位）。
@@ -347,19 +347,22 @@ PFL28（Type6）建议按 CAN FD 配置：
 sudo ip link set can0 type can bitrate 1000000 sample-point 0.8 dbitrate 5000000 dsample-point 0.75 fd on
 sudo ip link set can0 up
 ```
-若现场链路兼容性排障，可临时改成经典 CAN（`PFL28_USE_CANFD=0`）。
-Type6 默认采用智元/Xyber 风格：标准 ID `0` 的 64 字节 CAN FD 广播帧，每个电机按 `canid - 1` 写入 8 字节槽位：`position(float32 LE)` + `current(float32 LE)`。如需退回 P2P 标准 ID `canid` + 8 字节帧，可设置 `PFL28_XYBER_MODE=0`。
+Type6 默认采用智元/Xyber 风格：标准 ID `0` 的 64 字节 CAN FD 广播帧，同一 CAN 设备上的 PFL28 会按 `canid - 1` 一起写入 8 字节槽位：`position(float32 LE)` + `current(float32 LE)`。如需退回 P2P 标准 ID `canid` + 8 字节帧，可设置 `PFL28_XYBER_MODE=0`。
 
 代码中也会在接口存在但未启动时尝试拉起接口；如果权限不足，会提示你：
 - 使用 `sudo` 运行程序
 - 或给可执行文件添加 `CAP_NET_RAW` / `CAP_NET_ADMIN`
 
 ## 调整查询频率
-状态查询频率在 `main/show_status.cpp` 中写死为：
-```cpp
-double target_hz = 50.0;
+`show_status` 默认 10 Hz，可通过参数调整：
+```bash
+ros2 run khcan show_status --hz 20
 ```
-如需修改轮询频率，可直接编辑该值后重新编译。
+
+默认只查询状态。如果确认现场安全并且需要清错/使能：
+```bash
+ros2 run khcan show_status --clear-errors --enable
+```
 
 ## 当前仓库不包含的内容
 根据当前代码，下面这些内容并不在仓库内，因此不再作为使用方式说明：

@@ -41,9 +41,10 @@ struct Motor_CAN_Receive_Struct
 {
     uint8_t master_id;
     uint8_t motor_id;
-    uint8_t fault_message;
     uint8_t motor_state;
     uint8_t mode;
+    std::atomic<uint8_t> fault_message;
+    std::atomic<uint8_t> haitai_fault_source_command;
 
     std::atomic<float> current_position_f;
     std::atomic<float> current_speed_f;
@@ -59,17 +60,19 @@ struct Motor_CAN_Receive_Struct
     float haitai_mit_pos_max_rad;
     float haitai_mit_vel_max_rad_s;
     float haitai_mit_torque_max_nm;
-    uint8_t haitai_mit_status;
-    bool haitai_mit_in_mode;
-    bool haitai_mit_fault;
+    std::atomic<uint8_t> haitai_mit_status;
+    std::atomic<bool> haitai_mit_in_mode;
+    std::atomic<bool> haitai_mit_fault;
+    std::atomic<unsigned long long> feedback_sequence;
 
     Motor_CAN_Receive_Struct()
     {
         master_id = 0;
         motor_id = 0;
-        fault_message = 0;
         motor_state = 0;
         mode = 0;
+        fault_message = 0;
+        haitai_fault_source_command = 0;
         current_position_f = 0.0f;
         current_speed_f = 0.0f;
         current_torque_f = 0.0f;
@@ -87,13 +90,15 @@ struct Motor_CAN_Receive_Struct
         haitai_mit_status = 0;
         haitai_mit_in_mode = false;
         haitai_mit_fault = false;
+        feedback_sequence = 0;
     }
 
     Motor_CAN_Receive_Struct(const Motor_CAN_Receive_Struct &other)
     {
         master_id = other.master_id;
         motor_id = other.motor_id;
-        fault_message = other.fault_message;
+        fault_message.store(other.fault_message.load());
+        haitai_fault_source_command.store(other.haitai_fault_source_command.load());
         motor_state = other.motor_state;
         mode = other.mode;
         current_position_f.store(other.current_position_f.load());
@@ -110,9 +115,10 @@ struct Motor_CAN_Receive_Struct
         haitai_mit_pos_max_rad = other.haitai_mit_pos_max_rad;
         haitai_mit_vel_max_rad_s = other.haitai_mit_vel_max_rad_s;
         haitai_mit_torque_max_nm = other.haitai_mit_torque_max_nm;
-        haitai_mit_status = other.haitai_mit_status;
-        haitai_mit_in_mode = other.haitai_mit_in_mode;
-        haitai_mit_fault = other.haitai_mit_fault;
+        haitai_mit_status.store(other.haitai_mit_status.load());
+        haitai_mit_in_mode.store(other.haitai_mit_in_mode.load());
+        haitai_mit_fault.store(other.haitai_mit_fault.load());
+        feedback_sequence.store(other.feedback_sequence.load());
     }
 
     Motor_CAN_Receive_Struct &operator=(const Motor_CAN_Receive_Struct &other)
@@ -121,7 +127,8 @@ struct Motor_CAN_Receive_Struct
         {
             master_id = other.master_id;
             motor_id = other.motor_id;
-            fault_message = other.fault_message;
+            fault_message.store(other.fault_message.load());
+            haitai_fault_source_command.store(other.haitai_fault_source_command.load());
             motor_state = other.motor_state;
             mode = other.mode;
             current_position_f.store(other.current_position_f.load());
@@ -138,9 +145,10 @@ struct Motor_CAN_Receive_Struct
             haitai_mit_pos_max_rad = other.haitai_mit_pos_max_rad;
             haitai_mit_vel_max_rad_s = other.haitai_mit_vel_max_rad_s;
             haitai_mit_torque_max_nm = other.haitai_mit_torque_max_nm;
-            haitai_mit_status = other.haitai_mit_status;
-            haitai_mit_in_mode = other.haitai_mit_in_mode;
-            haitai_mit_fault = other.haitai_mit_fault;
+            haitai_mit_status.store(other.haitai_mit_status.load());
+            haitai_mit_in_mode.store(other.haitai_mit_in_mode.load());
+            haitai_mit_fault.store(other.haitai_mit_fault.load());
+            feedback_sequence.store(other.feedback_sequence.load());
         }
         return *this;
     }

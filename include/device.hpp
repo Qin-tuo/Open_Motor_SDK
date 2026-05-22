@@ -137,14 +137,18 @@ public:
     bool Init(const std::string& iface, int dev_idx,
               std::vector<Motor_CAN_Struct>* data_ptr, TopoMapper* mapper_ptr);
 
-    void SendCommand(int& motor_index);
-    void EnableMotor(int& motor_index);
-    void DisableMotor(int& motor_index);
+    bool SendCommand(int& motor_index);
+    bool EnableMotor(int& motor_index);
+    bool DisableMotor(int& motor_index);
     void ClearError(int& motor_index);
     void SetZero(int& motor_index);
-    void SetMode(int& motor_index, int mode);
-    void QueryPos(int& motor_index);
+    bool SetMode(int& motor_index, int mode);
+    bool ConfigureHaitaiMitLimits(int& motor_index);
+    bool QueryPos(int& motor_index);
     void QueryVersion(int& motor_index);
+    unsigned long long EnobufsDropCount() const;
+    bool SocketReady() const;
+    const std::string& InterfaceName() const;
 
     void ReceiveLoop();
 
@@ -152,77 +156,78 @@ private:
     bool openSocket(const std::string& iface, bool enable_canfd, int dbitrate = 1000000);
     bool sendFrameWithRetry(const void* frame, std::size_t frame_size, const char* tag);
 
-    void sendExtendedFrame(uint32_t type, uint16_t data_area, uint8_t motor_id, const uint8_t* data);
-    void writeType1Param(uint8_t motor_id, uint16_t index, float value);
-    void sendExtendedIdFrame(uint32_t can_id, const uint8_t* data, uint8_t dlc = 8);
-    void sendExtendedIdFdFrame(uint32_t can_id, const uint8_t* data, uint8_t len);
-    void sendStandardFrame(uint32_t can_id, const uint8_t* data, uint8_t dlc = 8);
-    void sendStandardFdFrame(uint32_t can_id, const uint8_t* data, uint8_t len, bool brs);
-    void sendRawFrame(uint8_t chan, uint32_t type, uint16_t data_area, uint8_t motor_id, uint8_t* data);
+    bool sendExtendedFrame(uint32_t type, uint16_t data_area, uint8_t motor_id, const uint8_t* data);
+    bool writeType1Param(uint8_t motor_id, uint16_t index, float value);
+    bool sendExtendedIdFrame(uint32_t can_id, const uint8_t* data, uint8_t dlc = 8);
+    bool sendExtendedIdFdFrame(uint32_t can_id, const uint8_t* data, uint8_t len);
+    bool sendStandardFrame(uint32_t can_id, const uint8_t* data, uint8_t dlc = 8);
+    bool sendStandardFdFrame(uint32_t can_id, const uint8_t* data, uint8_t len, bool brs);
+    bool sendRawFrame(uint8_t chan, uint32_t type, uint16_t data_area, uint8_t motor_id, uint8_t* data);
     std::atomic<unsigned long long> enobufs_drop_count{0};
     std::atomic<unsigned long long> last_enobufs_log_ms{0};
 
     // Type 1 (LimX)
-    void EnableMotor_Type1(int& motor_index);
-    void DisableMotor_Type1(int& motor_index);
+    bool EnableMotor_Type1(int& motor_index);
+    bool DisableMotor_Type1(int& motor_index);
     void ClearError_Type1(int& motor_index);
     void SetZero_Type1(int& motor_index);
-    void SetMode_Type1(int& motor_index, int mode);
-    void SendCommand_Type1(int& motor_index);
-    void QueryPos_Type1(int& motor_index);
+    bool SetMode_Type1(int& motor_index, int mode);
+    bool SendCommand_Type1(int& motor_index);
+    bool QueryPos_Type1(int& motor_index);
 
     // Type 2 (LK)
-    void EnableMotor_Type2(int& motor_index);
-    void DisableMotor_Type2(int& motor_index);
+    bool EnableMotor_Type2(int& motor_index);
+    bool DisableMotor_Type2(int& motor_index);
     void ClearError_Type2(int& motor_index);
     void SetZero_Type2(int& motor_index);
-    void SetMode_Type2(int& motor_index, int mode);
-    void SendCommand_Type2(int& motor_index);
-    void QueryPos_Type2(int& motor_index);
+    bool SetMode_Type2(int& motor_index, int mode);
+    bool SendCommand_Type2(int& motor_index);
+    bool QueryPos_Type2(int& motor_index);
 
     // Type 3 (DM)
-    void EnableMotor_Type3(int& motor_index);
-    void DisableMotor_Type3(int& motor_index);
+    bool EnableMotor_Type3(int& motor_index);
+    bool DisableMotor_Type3(int& motor_index);
     void ClearError_Type3(int& motor_index);
     void SetZero_Type3(int& motor_index);
-    void SetMode_Type3(int& motor_index, int mode);
-    void SendCommand_Type3(int& motor_index);
-    void QueryPos_Type3(int& motor_index);
+    bool SetMode_Type3(int& motor_index, int mode);
+    bool SendCommand_Type3(int& motor_index);
+    bool QueryPos_Type3(int& motor_index);
 
     // Type 5 (HighTorque/高擎)
-    void EnableMotor_Type5(int& motor_index);
-    void DisableMotor_Type5(int& motor_index);
+    bool EnableMotor_Type5(int& motor_index);
+    bool DisableMotor_Type5(int& motor_index);
     void ClearError_Type5(int& motor_index);
     void SetZero_Type5(int& motor_index);
-    void SetMode_Type5(int& motor_index, int mode);
-    void SendCommand_Type5(int& motor_index);
-    void QueryPos_Type5(int& motor_index);
+    bool SetMode_Type5(int& motor_index, int mode);
+    bool SendCommand_Type5(int& motor_index);
+    bool QueryPos_Type5(int& motor_index);
 
     // Type 6 (AgiBot PowerFlow L28/PFL28)
-    void EnableMotor_Type6(int& motor_index);
-    void DisableMotor_Type6(int& motor_index);
+    bool EnableMotor_Type6(int& motor_index);
+    bool DisableMotor_Type6(int& motor_index);
     void ClearError_Type6(int& motor_index);
     void SetZero_Type6(int& motor_index);
-    void SetMode_Type6(int& motor_index, int mode);
-    void SendCommand_Type6(int& motor_index);
-    void QueryPos_Type6(int& motor_index);
+    bool SetMode_Type6(int& motor_index, int mode);
+    bool SendCommand_Type6(int& motor_index);
+    bool SendCommand_Type6_XyberBroadcast(int& motor_index);
+    bool QueryPos_Type6(int& motor_index);
 
     // Type 7 (Haitai/海泰)
-    void EnableMotor_Type7(int& motor_index);
-    void DisableMotor_Type7(int& motor_index);
+    bool EnableMotor_Type7(int& motor_index);
+    bool DisableMotor_Type7(int& motor_index);
     void ClearError_Type7(int& motor_index);
     void SetZero_Type7(int& motor_index);
-    void SetMode_Type7(int& motor_index, int mode);
-    void SendCommand_Type7(int& motor_index);
-    void QueryPos_Type7(int& motor_index);
+    bool SetMode_Type7(int& motor_index, int mode);
+    bool SendCommand_Type7(int& motor_index);
+    bool QueryPos_Type7(int& motor_index);
     void QueryVersion_Type7(int& motor_index);
 
     // Type 8 (ENCOS EC-A series)
-    void EnableMotor_Type8(int& motor_index);
-    void DisableMotor_Type8(int& motor_index);
+    bool EnableMotor_Type8(int& motor_index);
+    bool DisableMotor_Type8(int& motor_index);
     void ClearError_Type8(int& motor_index);
     void SetZero_Type8(int& motor_index);
-    void SetMode_Type8(int& motor_index, int mode);
-    void SendCommand_Type8(int& motor_index);
-    void QueryPos_Type8(int& motor_index);
+    bool SetMode_Type8(int& motor_index, int mode);
+    bool SendCommand_Type8(int& motor_index);
+    bool QueryPos_Type8(int& motor_index);
 };

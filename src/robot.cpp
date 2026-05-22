@@ -4,6 +4,7 @@
 #include <chrono>
 #include <iomanip>
 #include <iostream>
+#include <set>
 #include <thread>
 
 namespace {
@@ -22,7 +23,15 @@ bool valid_feetech_index(const std::vector<FeetechServoDevice*>& devices, int id
 
 }  // namespace
 
-BaseRobot::BaseRobot(const std::string& config_file) {
+BaseRobot::BaseRobot(const std::string& config_file, bool disable_on_destroy)
+    : BaseRobot(config_file, disable_on_destroy, {}) {}
+
+BaseRobot::BaseRobot(const std::string& config_file,
+                     bool disable_on_destroy,
+                     const std::vector<std::string>& active_motor_names)
+    : disable_on_destroy_(disable_on_destroy) {
+    const std::set<std::string> active_motor_set(
+        active_motor_names.begin(), active_motor_names.end());
     auto infos = MotorConfigLoader::loadConfig(config_file);
     if (infos.empty()) {
         std::cerr << "[Error] No motors loaded from " << config_file << std::endl;
@@ -67,6 +76,9 @@ BaseRobot::BaseRobot(const std::string& config_file) {
 
     for (std::size_t i = 0; i < global_motors.size(); ++i) {
         const auto& motor = global_motors[i];
+        if (!active_motor_set.empty() && active_motor_set.count(motor.info.name) == 0) {
+            continue;
+        }
         const int dev_idx = motor.info.device_index;
         if (dev_idx < 0 || static_cast<std::size_t>(dev_idx) >= devices.size()) {
             std::cerr << "[Error] Invalid device index for motor " << motor.info.name << std::endl;
@@ -109,10 +121,12 @@ BaseRobot::BaseRobot(const std::string& config_file) {
 }
 
 BaseRobot::~BaseRobot() {
-    try {
-        DisableAll();
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    } catch (...) {
+    if (disable_on_destroy_) {
+        try {
+            DisableAll();
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        } catch (...) {
+        }
     }
 
     for (auto* device : devices) {
@@ -159,44 +173,46 @@ void BaseRobot::DisableAll() {
     }
 }
 
-void BaseRobot::Enable_N(int N) {
+bool BaseRobot::Enable_N(int N) {
     if (!valid_motor_index(global_motors, N)) {
         std::cerr << "[Error] Enable_N: motor index " << N << " out of range." << std::endl;
-        return;
+        return false;
     }
 
     const int dev_idx = global_motors[N].info.device_index;
     if (global_motors[N].info.api_type == 4) {
         if (!valid_feetech_index(feetech_devices, dev_idx)) {
             std::cerr << "[Error] Enable_N: Feetech device not found for motor " << N << std::endl;
-            return;
+            return false;
         }
         feetech_devices[dev_idx]->EnableMotor(N);
-        return;
+        return true;
     }
 
     if (!valid_device_index(devices, dev_idx)) {
         std::cerr << "[Error] Enable_N: device not found for motor " << N << std::endl;
-        return;
+        return false;
     }
 
-    devices[dev_idx]->EnableMotor(N);
+    return devices[dev_idx]->EnableMotor(N);
 }
 
-void BaseRobot::Disable_N(int N) {
-    if (!valid_motor_index(global_motors, N)) return;
+bool BaseRobot::Disable_N(int N) {
+    if (!valid_motor_index(global_motors, N)) return false;
 
     const int dev_idx = global_motors[N].info.device_index;
     if (global_motors[N].info.api_type == 4) {
         if (valid_feetech_index(feetech_devices, dev_idx)) {
             feetech_devices[dev_idx]->DisableMotor(N);
+            return true;
         }
-        return;
+        return false;
     }
 
     if (valid_device_index(devices, dev_idx)) {
-        devices[dev_idx]->DisableMotor(N);
+        return devices[dev_idx]->DisableMotor(N);
     }
+    return false;
 }
 
 void BaseRobot::ClearError_N(int N) {
@@ -271,27 +287,53 @@ void BaseRobot::SetZero_All() {
     std::cout << "[Info] Set Zero command sent to all motors." << std::endl;
 }
 
-void BaseRobot::SetMode_N(int N, int mode) {
+bool BaseRobot::SetMode_N(int N, int mode) {
     if (!valid_motor_index(global_motors, N)) {
         std::cerr << "[Error] SetMode_N: motor index " << N << " out of range." << std::endl;
-        return;
+        return false;
     }
 
     const int dev_idx = global_motors[N].info.device_index;
     if (global_motors[N].info.api_type == 4) {
         if (valid_feetech_index(feetech_devices, dev_idx)) {
             feetech_devices[dev_idx]->SetMode(N, mode);
+            return true;
         } else {
             std::cerr << "[Error] SetMode_N: Feetech device not found for motor " << N << std::endl;
         }
-        return;
+        return false;
     }
 
     if (valid_device_index(devices, dev_idx)) {
-        devices[dev_idx]->SetMode(N, mode);
+        return devices[dev_idx]->SetMode(N, mode);
     } else {
         std::cerr << "[Error] SetMode_N: device not found for motor " << N << std::endl;
     }
+    return false;
+}
+
+bool BaseRobot::ConfigureHaitaiMitLimits_N(int N) {
+    if (!valid_motor_index(global_motors, N)) {
+        std::cerr << "[Error] ConfigureHaitaiMitLimits_N: motor index " << N
+                  << " out of range." << std::endl;
+        return false;
+    }
+
+    const auto& motor = global_motors[N];
+    if (motor.info.api_type != 7) {
+        std::cerr << "[Error] ConfigureHaitaiMitLimits_N: motor " << N
+                  << " is not Haitai api_type=7." << std::endl;
+        return false;
+    }
+
+    const int dev_idx = motor.info.device_index;
+    if (!valid_device_index(devices, dev_idx)) {
+        std::cerr << "[Error] ConfigureHaitaiMitLimits_N: device not found for motor "
+                  << N << std::endl;
+        return false;
+    }
+
+    return devices[dev_idx]->ConfigureHaitaiMitLimits(N);
 }
 
 void BaseRobot::SetModes(std::vector<int>& modes) {
@@ -312,29 +354,41 @@ void BaseRobot::SetModeAll_TypeX(int X, int mode) {
     }
 }
 
-void BaseRobot::Move_N(int N, const MotorCmdVec& target) {
-    if (!valid_motor_index(global_motors, N)) return;
-
+bool BaseRobot::Stage_N(int N, const MotorCmdVec& target) {
+    if (!valid_motor_index(global_motors, N)) return false;
     auto& motor = global_motors[N];
     motor.send.position = Clip(target.p, motor.info.pos_min, motor.info.pos_max);
     motor.send.speed = target.v;
     motor.send.torque = target.t;
+    return true;
+}
 
+bool BaseRobot::Flush_N(int N) {
+    if (!valid_motor_index(global_motors, N)) return false;
+
+    auto& motor = global_motors[N];
     const int dev_idx = motor.info.device_index;
     if (motor.info.api_type == 4) {
         if (valid_feetech_index(feetech_devices, dev_idx)) {
             feetech_devices[dev_idx]->SendCommand(N);
+            return true;
         }
-        return;
+        return false;
     }
 
     if (valid_device_index(devices, dev_idx)) {
-        devices[dev_idx]->SendCommand(N);
+        return devices[dev_idx]->SendCommand(N);
     }
+    return false;
 }
 
-void BaseRobot::Move(const std::vector<MotorCmdVec>& targets) {
+bool BaseRobot::Move_N(int N, const MotorCmdVec& target) {
+    return Stage_N(N, target) && Flush_N(N);
+}
+
+bool BaseRobot::Move(const std::vector<MotorCmdVec>& targets) {
     const std::size_t count = std::min(targets.size(), global_motors.size());
+    bool all_sent = true;
     for (std::size_t i = 0; i < count; ++i) {
         auto& motor = global_motors[i];
         const auto& cmd = targets[i];
@@ -347,6 +401,8 @@ void BaseRobot::Move(const std::vector<MotorCmdVec>& targets) {
             if (valid_feetech_index(feetech_devices, dev_idx)) {
                 int idx = static_cast<int>(i);
                 feetech_devices[dev_idx]->SendCommand(idx);
+            } else {
+                all_sent = false;
             }
             std::this_thread::sleep_for(std::chrono::microseconds(100));
             continue;
@@ -354,10 +410,13 @@ void BaseRobot::Move(const std::vector<MotorCmdVec>& targets) {
 
         if (valid_device_index(devices, dev_idx)) {
             int idx = static_cast<int>(i);
-            devices[dev_idx]->SendCommand(idx);
+            all_sent = devices[dev_idx]->SendCommand(idx) && all_sent;
+        } else {
+            all_sent = false;
         }
         std::this_thread::sleep_for(std::chrono::microseconds(100));
     }
+    return all_sent;
 }
 
 void BaseRobot::PrintStatus() {
@@ -371,7 +430,7 @@ void BaseRobot::PrintStatus() {
                   << " | ID: " << m.info.num
                   << " [" << m.info.name << "]"
                   << " | Cmd: " << std::fixed << std::setprecision(2) << m.send.position
-                  << " | Fault: " << static_cast<int>(m.recv.fault_message)
+                  << " | Fault: " << static_cast<int>(m.recv.fault_message.load())
                   << " | ReadPos: " << m.recv.current_position_f.load()
                   << " | ReadVel: " << m.recv.current_speed_f.load()
                   << std::endl;
@@ -400,27 +459,29 @@ std::vector<float> BaseRobot::GetPosN(int n) {
     return positions;
 }
 
-void BaseRobot::QueryPos_N(int N) {
+bool BaseRobot::QueryPos_N(int N) {
     if (!valid_motor_index(global_motors, N)) {
         std::cerr << "[Error] QueryPos_N: motor index " << N << " out of range." << std::endl;
-        return;
+        return false;
     }
 
     const int dev_idx = global_motors[N].info.device_index;
     if (global_motors[N].info.api_type == 4) {
         if (valid_feetech_index(feetech_devices, dev_idx)) {
             feetech_devices[dev_idx]->QueryPos(N);
+            return true;
         } else {
             std::cerr << "[Error] QueryPos_N: Feetech device not found for motor " << N << std::endl;
         }
-        return;
+        return false;
     }
 
     if (valid_device_index(devices, dev_idx)) {
-        devices[dev_idx]->QueryPos(N);
+        return devices[dev_idx]->QueryPos(N);
     } else {
         std::cerr << "[Error] QueryPos_N: device not found for motor " << N << std::endl;
     }
+    return false;
 }
 
 void BaseRobot::QueryPos_ALL() {
@@ -464,6 +525,15 @@ void BaseRobot::QueryVersion_N(int N) {
     } else {
         std::cerr << "[Error] QueryVersion_N: device not found for motor " << N << std::endl;
     }
+}
+
+int BaseRobot::FindMotorIndexByName(const std::string& name) const {
+    for (std::size_t i = 0; i < global_motors.size(); ++i) {
+        if (global_motors[i].info.name == name) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
 }
 
 bool BaseRobot::IsMotorReady(int N) const {

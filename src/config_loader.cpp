@@ -84,7 +84,7 @@ bool get_haitai_model_defaults(const std::string& key, MotorModelDefaults& out) 
     if (key == "HT2205") { out = make_symmetric_defaults(95.5f, 125.66f, 500.0f, 5.0f, 0.06f); return true; }
     if (key == "HT3505-J8") { out = make_symmetric_defaults(95.5f, 32.04f, 500.0f, 5.0f, 0.85f); return true; }
     if (key_is(key, {"HT4305", "HT4305-J10"})) { out = make_symmetric_defaults(95.5f, 41.89f, 500.0f, 5.0f, 3.0f); return true; }
-    if (key == "HT4310-J10") { out = make_symmetric_defaults(95.5f, 31.42f, 500.0f, 5.0f, 5.8f); return true; }
+    if (key == "HT4310-J10") { out = make_symmetric_defaults(95.5f, 31.42f, 500.0f, 5.0f, 1.0f); return true; }
     if (key == "HT6010-J6") { out = make_symmetric_defaults(95.5f, 70.16f, 500.0f, 5.0f, 9.0f); return true; }
     return false;
 }

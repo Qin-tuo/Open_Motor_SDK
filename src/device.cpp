@@ -444,6 +444,7 @@ Feedback parse_feedback(const uint8_t* data, uint8_t len, const Limits& limits) 
 namespace {
 
 constexpr float kHaitaiTwoPi = 6.28318530718f;
+constexpr float kHaitaiPi = 3.14159265359f;
 constexpr float kHaitaiCountPerTurn = 16384.0f;
 constexpr float kHaitaiSpeedScale = 100.0f;    // 0.01 rpm
 constexpr float kHaitaiCurrentScale = 1000.0f; // 0.001 A
@@ -510,6 +511,12 @@ int32_t haitai_amp_to_milliamp(float amp) {
 
 float haitai_count_to_rad(int32_t count) {
     return static_cast<float>(count) * (kHaitaiTwoPi / kHaitaiCountPerTurn);
+}
+
+float haitai_wrap_to_signed_pi(float rad) {
+    float wrapped = std::fmod(rad + kHaitaiPi, kHaitaiTwoPi);
+    if (wrapped < 0.0f) wrapped += kHaitaiTwoPi;
+    return wrapped - kHaitaiPi;
 }
 
 float haitai_rpm_x100_to_rad_s(int32_t raw) {
@@ -732,7 +739,8 @@ bool parse_haitai_feedback(uint32_t can_id, const std::array<uint8_t, 8>& data,
             out.temperature_c = static_cast<float>(data[1]);
             out.current_a = haitai_milliamp_to_amp(haitai_read_le_i16(&data[2]));
             out.speed_rad_s = haitai_rpm_x100_to_rad_s(haitai_read_le_i16(&data[4]));
-            out.position_rad = haitai_count_to_rad(haitai_read_le_u16(&data[6]));
+            out.position_rad = haitai_wrap_to_signed_pi(
+                haitai_count_to_rad(haitai_read_le_u16(&data[6])));
             return true;
         case 0xAE:
         case 0xCF:
@@ -751,7 +759,11 @@ bool parse_haitai_feedback(uint32_t can_id, const std::array<uint8_t, 8>& data,
             out.fault = data[1];
             return true;
         case 0xB1:
-            return dlc == 3;
+            if (dlc != 3) return false;
+            out.has_position = true;
+            out.position_rad = haitai_wrap_to_signed_pi(
+                haitai_count_to_rad(haitai_read_le_u16(&data[1])));
+            return true;
         case 0xF0:
             if (dlc != 7) return false;
             out.has_mit_limits = true;
@@ -1529,6 +1541,18 @@ bool DeviceX::Init(const std::string& iface, int dev_idx,
     return true;
 }
 
+unsigned long long DeviceX::EnobufsDropCount() const {
+    return enobufs_drop_count.load(std::memory_order_relaxed);
+}
+
+bool DeviceX::SocketReady() const {
+    return socket_fd >= 0;
+}
+
+const std::string& DeviceX::InterfaceName() const {
+    return iface_name;
+}
+
 bool DeviceX::sendFrameWithRetry(const void* frame, std::size_t frame_size, const char* tag) {
     if (socket_fd < 0 || frame == nullptr || frame_size == 0) {
         return false;
@@ -1591,101 +1615,103 @@ bool DeviceX::sendFrameWithRetry(const void* frame, std::size_t frame_size, cons
     return false;
 }
 
-void DeviceX::sendExtendedFrame(uint32_t type, uint16_t data_area, uint8_t motor_id, const uint8_t* data) {
-    if (socket_fd < 0) return;
+bool DeviceX::sendExtendedFrame(uint32_t type, uint16_t data_area, uint8_t motor_id, const uint8_t* data) {
+    if (socket_fd < 0 || data == nullptr) return false;
 
     struct can_frame frame {};
     frame.can_id = ((type & 0x1F) << 24) | ((data_area & 0xFFFF) << 8) | (motor_id & 0xFF);
     frame.can_id |= CAN_EFF_FLAG;
     frame.can_dlc = 8;
     std::memcpy(frame.data, data, 8);
-    sendFrameWithRetry(&frame, sizeof(frame), "sendExtendedFrame");
+    return sendFrameWithRetry(&frame, sizeof(frame), "sendExtendedFrame");
 }
 
-void DeviceX::writeType1Param(uint8_t motor_id, uint16_t index, float value) {
+bool DeviceX::writeType1Param(uint8_t motor_id, uint16_t index, float value) {
     uint8_t data[8] = {0};
     std::memcpy(&data[0], &index, sizeof(index));
     std::memcpy(&data[4], &value, sizeof(value));
-    sendExtendedFrame(18, 0xFD, motor_id, data);
+    return sendExtendedFrame(18, 0xFD, motor_id, data);
 }
 
-void DeviceX::sendExtendedIdFrame(uint32_t can_id, const uint8_t* data, uint8_t dlc) {
-    if (socket_fd < 0 || dlc > 8) return;
+bool DeviceX::sendExtendedIdFrame(uint32_t can_id, const uint8_t* data, uint8_t dlc) {
+    if (socket_fd < 0 || data == nullptr || dlc > 8) return false;
 
     struct can_frame frame {};
     frame.can_id = (can_id & CAN_EFF_MASK) | CAN_EFF_FLAG;
     frame.can_dlc = dlc;
     std::memcpy(frame.data, data, dlc);
-    sendFrameWithRetry(&frame, sizeof(frame), "sendExtendedIdFrame");
+    return sendFrameWithRetry(&frame, sizeof(frame), "sendExtendedIdFrame");
 }
 
-void DeviceX::sendExtendedIdFdFrame(uint32_t can_id, const uint8_t* data, uint8_t len) {
-    if (socket_fd < 0 || len > 64) return;
+bool DeviceX::sendExtendedIdFdFrame(uint32_t can_id, const uint8_t* data, uint8_t len) {
+    if (socket_fd < 0 || data == nullptr || len > 64) return false;
 
     struct canfd_frame frame {};
     frame.can_id = (can_id & CAN_EFF_MASK) | CAN_EFF_FLAG;
     frame.len = len;
     frame.flags = use_canfd_brs() ? CANFD_BRS : 0;
     std::memcpy(frame.data, data, len);
-    sendFrameWithRetry(&frame, sizeof(frame), "sendExtendedIdFdFrame");
+    return sendFrameWithRetry(&frame, sizeof(frame), "sendExtendedIdFdFrame");
 }
 
-void DeviceX::sendStandardFrame(uint32_t can_id, const uint8_t* data, uint8_t dlc) {
-    if (socket_fd < 0) return;
+bool DeviceX::sendStandardFrame(uint32_t can_id, const uint8_t* data, uint8_t dlc) {
+    if (socket_fd < 0 || data == nullptr || dlc > 8) return false;
 
     struct can_frame frame {};
     frame.can_id = (can_id & CAN_SFF_MASK);
     frame.can_dlc = dlc;
     std::memcpy(frame.data, data, dlc);
-    sendFrameWithRetry(&frame, sizeof(frame), "sendStandardFrame");
+    return sendFrameWithRetry(&frame, sizeof(frame), "sendStandardFrame");
 }
 
-void DeviceX::sendStandardFdFrame(uint32_t can_id, const uint8_t* data, uint8_t len, bool brs) {
-    if (socket_fd < 0 || len > CANFD_MAX_DLEN) return;
+bool DeviceX::sendStandardFdFrame(uint32_t can_id, const uint8_t* data, uint8_t len, bool brs) {
+    if (socket_fd < 0 || data == nullptr || len > CANFD_MAX_DLEN) return false;
 
     struct canfd_frame frame {};
     frame.can_id = (can_id & CAN_SFF_MASK);
     frame.len = len;
     frame.flags = brs ? CANFD_BRS : 0;
     std::memcpy(frame.data, data, len);
-    sendFrameWithRetry(&frame, sizeof(frame), "sendStandardFdFrame");
+    return sendFrameWithRetry(&frame, sizeof(frame), "sendStandardFdFrame");
 }
 
-void DeviceX::sendRawFrame(uint8_t chan, uint32_t type, uint16_t data_area, uint8_t motor_id, uint8_t* data) {
+bool DeviceX::sendRawFrame(uint8_t chan, uint32_t type, uint16_t data_area, uint8_t motor_id, uint8_t* data) {
     (void)chan;
-    sendExtendedFrame(type, data_area, motor_id, data);
+    return sendExtendedFrame(type, data_area, motor_id, data);
 }
 
 // =========================================================
 //  DeviceX public dispatch
 // =========================================================
 
-void DeviceX::EnableMotor(int& motor_index) {
-    if (!p_motors_data || motor_index < 0 || motor_index >= (int)p_motors_data->size()) return;
+bool DeviceX::EnableMotor(int& motor_index) {
+    if (!p_motors_data || motor_index < 0 || motor_index >= (int)p_motors_data->size()) return false;
 
     int type = (*p_motors_data)[motor_index].info.api_type;
 
-    if (type == 1) EnableMotor_Type1(motor_index);
-    else if (type == 2) EnableMotor_Type2(motor_index);
-    else if (type == 3) EnableMotor_Type3(motor_index);
-    else if (type == 5) EnableMotor_Type5(motor_index);
-    else if (type == 6) EnableMotor_Type6(motor_index);
-    else if (type == 7) EnableMotor_Type7(motor_index);
-    else if (type == 8) EnableMotor_Type8(motor_index);
+    if (type == 1) return EnableMotor_Type1(motor_index);
+    else if (type == 2) return EnableMotor_Type2(motor_index);
+    else if (type == 3) return EnableMotor_Type3(motor_index);
+    else if (type == 5) return EnableMotor_Type5(motor_index);
+    else if (type == 6) return EnableMotor_Type6(motor_index);
+    else if (type == 7) return EnableMotor_Type7(motor_index);
+    else if (type == 8) return EnableMotor_Type8(motor_index);
+    return false;
 }
 
-void DeviceX::DisableMotor(int& motor_index) {
-    if (!p_motors_data || motor_index < 0 || motor_index >= (int)p_motors_data->size()) return;
+bool DeviceX::DisableMotor(int& motor_index) {
+    if (!p_motors_data || motor_index < 0 || motor_index >= (int)p_motors_data->size()) return false;
 
     int type = (*p_motors_data)[motor_index].info.api_type;
 
-    if (type == 1) DisableMotor_Type1(motor_index);
-    else if (type == 2) DisableMotor_Type2(motor_index);
-    else if (type == 3) DisableMotor_Type3(motor_index);
-    else if (type == 5) DisableMotor_Type5(motor_index);
-    else if (type == 6) DisableMotor_Type6(motor_index);
-    else if (type == 7) DisableMotor_Type7(motor_index);
-    else if (type == 8) DisableMotor_Type8(motor_index);
+    if (type == 1) return DisableMotor_Type1(motor_index);
+    else if (type == 2) return DisableMotor_Type2(motor_index);
+    else if (type == 3) return DisableMotor_Type3(motor_index);
+    else if (type == 5) return DisableMotor_Type5(motor_index);
+    else if (type == 6) return DisableMotor_Type6(motor_index);
+    else if (type == 7) return DisableMotor_Type7(motor_index);
+    else if (type == 8) return DisableMotor_Type8(motor_index);
+    return false;
 }
 
 void DeviceX::ClearError(int& motor_index) {
@@ -1716,49 +1742,52 @@ void DeviceX::SetZero(int& motor_index) {
     else if (type == 8) SetZero_Type8(motor_index);
 }
 
-void DeviceX::SetMode(int& motor_index, int mode) {
-    if (!p_motors_data || motor_index < 0 || motor_index >= (int)p_motors_data->size()) return;
+bool DeviceX::SetMode(int& motor_index, int mode) {
+    if (!p_motors_data || motor_index < 0 || motor_index >= (int)p_motors_data->size()) return false;
 
     int type = (*p_motors_data)[motor_index].info.api_type;
 
-    if (type == 1) SetMode_Type1(motor_index, mode);
-    else if (type == 2) SetMode_Type2(motor_index, mode);
-    else if (type == 3) SetMode_Type3(motor_index, mode);
-    else if (type == 5) SetMode_Type5(motor_index, mode);
-    else if (type == 6) SetMode_Type6(motor_index, mode);
-    else if (type == 7) SetMode_Type7(motor_index, mode);
-    else if (type == 8) SetMode_Type8(motor_index, mode);
+    if (type == 1) return SetMode_Type1(motor_index, mode);
+    else if (type == 2) return SetMode_Type2(motor_index, mode);
+    else if (type == 3) return SetMode_Type3(motor_index, mode);
+    else if (type == 5) return SetMode_Type5(motor_index, mode);
+    else if (type == 6) return SetMode_Type6(motor_index, mode);
+    else if (type == 7) return SetMode_Type7(motor_index, mode);
+    else if (type == 8) return SetMode_Type8(motor_index, mode);
+    return false;
 }
 
-void DeviceX::SendCommand(int& motor_index) {
+bool DeviceX::SendCommand(int& motor_index) {
     if (!p_motors_data || motor_index < 0 || motor_index >= (int)p_motors_data->size()) {
         std::cerr << "[ERROR] SendCommand Failed! Index Out of Range or Null Ptr." << std::endl;
-        return;
+        return false;
     }
 
     int type = (*p_motors_data)[motor_index].info.api_type;
 
-    if (type == 1) SendCommand_Type1(motor_index);
-    else if (type == 2) SendCommand_Type2(motor_index);
-    else if (type == 3) SendCommand_Type3(motor_index);
-    else if (type == 5) SendCommand_Type5(motor_index);
-    else if (type == 6) SendCommand_Type6(motor_index);
-    else if (type == 7) SendCommand_Type7(motor_index);
-    else if (type == 8) SendCommand_Type8(motor_index);
+    if (type == 1) return SendCommand_Type1(motor_index);
+    else if (type == 2) return SendCommand_Type2(motor_index);
+    else if (type == 3) return SendCommand_Type3(motor_index);
+    else if (type == 5) return SendCommand_Type5(motor_index);
+    else if (type == 6) return SendCommand_Type6(motor_index);
+    else if (type == 7) return SendCommand_Type7(motor_index);
+    else if (type == 8) return SendCommand_Type8(motor_index);
+    return false;
 }
 
-void DeviceX::QueryPos(int& motor_index) {
-    if (!p_motors_data || motor_index < 0 || motor_index >= (int)p_motors_data->size()) return;
+bool DeviceX::QueryPos(int& motor_index) {
+    if (!p_motors_data || motor_index < 0 || motor_index >= (int)p_motors_data->size()) return false;
 
     int type = (*p_motors_data)[motor_index].info.api_type;
 
-    if (type == 1) QueryPos_Type1(motor_index);
-    else if (type == 2) QueryPos_Type2(motor_index);
-    else if (type == 3) QueryPos_Type3(motor_index);
-    else if (type == 5) QueryPos_Type5(motor_index);
-    else if (type == 6) QueryPos_Type6(motor_index);
-    else if (type == 7) QueryPos_Type7(motor_index);
-    else if (type == 8) QueryPos_Type8(motor_index);
+    if (type == 1) return QueryPos_Type1(motor_index);
+    else if (type == 2) return QueryPos_Type2(motor_index);
+    else if (type == 3) return QueryPos_Type3(motor_index);
+    else if (type == 5) return QueryPos_Type5(motor_index);
+    else if (type == 6) return QueryPos_Type6(motor_index);
+    else if (type == 7) return QueryPos_Type7(motor_index);
+    else if (type == 8) return QueryPos_Type8(motor_index);
+    return false;
 }
 
 void DeviceX::QueryVersion(int& motor_index) {
@@ -1772,16 +1801,16 @@ void DeviceX::QueryVersion(int& motor_index) {
 //  Type 1 (LimX)
 // =========================================================
 
-void DeviceX::EnableMotor_Type1(int& motor_index) {
+bool DeviceX::EnableMotor_Type1(int& motor_index) {
     const auto& info = (*p_motors_data)[motor_index].info;
     uint8_t data[8] = {0};
-    sendExtendedFrame(3, 0xFD, info.canid, data);
+    return sendExtendedFrame(3, 0xFD, info.canid, data);
 }
 
-void DeviceX::DisableMotor_Type1(int& motor_index) {
+bool DeviceX::DisableMotor_Type1(int& motor_index) {
     const auto& info = (*p_motors_data)[motor_index].info;
     uint8_t data[8] = {0};
-    sendExtendedFrame(4, 0xFD, info.canid, data);
+    return sendExtendedFrame(4, 0xFD, info.canid, data);
 }
 
 void DeviceX::ClearError_Type1(int& motor_index) {
@@ -1811,7 +1840,7 @@ void DeviceX::SetZero_Type1(int& motor_index) {
     sendExtendedFrame(22, 0xFD, info.canid, data);
 }
 
-void DeviceX::SetMode_Type1(int& motor_index, int mode) {
+bool DeviceX::SetMode_Type1(int& motor_index, int mode) {
     auto& motor = (*p_motors_data)[motor_index];
     const auto& info = motor.info;
     if (mode < 0) mode = 0;
@@ -1825,10 +1854,10 @@ void DeviceX::SetMode_Type1(int& motor_index, int mode) {
     std::memcpy(&data[0], &index, 2);
     std::memcpy(&data[4], &mode_val, 1);
 
-    sendExtendedFrame(18, 0xFD, info.canid, data);
+    return sendExtendedFrame(18, 0xFD, info.canid, data);
 }
 
-void DeviceX::SendCommand_Type1(int& motor_index) {
+bool DeviceX::SendCommand_Type1(int& motor_index) {
     const Motor_CAN_Struct& motor = (*p_motors_data)[motor_index];
     const auto& cmd = motor.send;
     const auto& info = motor.info;
@@ -1848,9 +1877,9 @@ void DeviceX::SendCommand_Type1(int& motor_index) {
         }
         limit_cur = std::max(0.0f, std::min(43.0f, limit_cur));
 
-        writeType1Param(static_cast<uint8_t>(info.canid), 0x7018, limit_cur);
-        writeType1Param(static_cast<uint8_t>(info.canid), 0x700A, speed);
-        return;
+        const bool limit_ok = writeType1Param(static_cast<uint8_t>(info.canid), 0x7018, limit_cur);
+        const bool speed_ok = writeType1Param(static_cast<uint8_t>(info.canid), 0x700A, speed);
+        return limit_ok && speed_ok;
     }
 
     uint16_t t_int = float_to_uint(cmd.torque, info.t_min, info.t_max, 16);
@@ -1868,37 +1897,37 @@ void DeviceX::SendCommand_Type1(int& motor_index) {
     data[6] = kd_int >> 8;
     data[7] = kd_int & 0xFF;
 
-    sendExtendedFrame(1, t_int, info.canid, data);
+    return sendExtendedFrame(1, t_int, info.canid, data);
 }
 
-void DeviceX::QueryPos_Type1(int& motor_index) {
+bool DeviceX::QueryPos_Type1(int& motor_index) {
     const auto& info = (*p_motors_data)[motor_index].info;
 
     uint8_t data[8] = {0};
     uint16_t index = 0x7019;
     std::memcpy(&data[0], &index, 2);
 
-    sendExtendedFrame(17, 0xFD, info.canid, data);
+    return sendExtendedFrame(17, 0xFD, info.canid, data);
 }
 
 // =========================================================
 //  Type 2 (LK)
 // =========================================================
 
-void DeviceX::EnableMotor_Type2(int& motor_index) {
+bool DeviceX::EnableMotor_Type2(int& motor_index) {
     const Motor_CAN_Struct& motor = (*p_motors_data)[motor_index];
 
     uint8_t data[8] = {0};
     data[0] = 0x88;
-    sendStandardFrame(0x140 + motor.info.canid, data);
+    return sendStandardFrame(0x140 + motor.info.canid, data);
 }
 
-void DeviceX::DisableMotor_Type2(int& motor_index) {
+bool DeviceX::DisableMotor_Type2(int& motor_index) {
     const Motor_CAN_Struct& motor = (*p_motors_data)[motor_index];
 
     uint8_t data[8] = {0};
     data[0] = 0x80;
-    sendStandardFrame(0x140 + motor.info.canid, data);
+    return sendStandardFrame(0x140 + motor.info.canid, data);
 }
 
 void DeviceX::ClearError_Type2(int& motor_index) {
@@ -1909,11 +1938,12 @@ void DeviceX::SetZero_Type2(int& motor_index) {
     (void)motor_index;
 }
 
-void DeviceX::SetMode_Type2(int& motor_index, int mode) {
+bool DeviceX::SetMode_Type2(int& motor_index, int mode) {
     (*p_motors_data)[motor_index].send.mode = static_cast<uint8_t>(mode);
+    return true;
 }
 
-void DeviceX::SendCommand_Type2(int& motor_index) {
+bool DeviceX::SendCommand_Type2(int& motor_index) {
     const Motor_CAN_Struct& motor = (*p_motors_data)[motor_index];
     const int id = motor.info.canid;
     const uint8_t current_mode = motor.send.mode;
@@ -1956,21 +1986,21 @@ void DeviceX::SendCommand_Type2(int& motor_index) {
         data[0] = 0x9C;
     }
 
-    sendStandardFrame(0x140 + id, data);
+    return sendStandardFrame(0x140 + id, data);
 }
 
-void DeviceX::QueryPos_Type2(int& motor_index) {
+bool DeviceX::QueryPos_Type2(int& motor_index) {
     const auto& info = (*p_motors_data)[motor_index].info;
     uint8_t data[8] = {0};
     data[0] = 0x9C;
-    sendStandardFrame(0x140 + info.canid, data);
+    return sendStandardFrame(0x140 + info.canid, data);
 }
 
 // =========================================================
 //  Type 3 (DM)
 // =========================================================
 
-void DeviceX::EnableMotor_Type3(int& motor_index) {
+bool DeviceX::EnableMotor_Type3(int& motor_index) {
     const auto& motor = (*p_motors_data)[motor_index];
 
     uint16_t canid = static_cast<uint16_t>(motor.info.canid);
@@ -1978,10 +2008,10 @@ void DeviceX::EnableMotor_Type3(int& motor_index) {
     uint32_t can_id = (mode == 1) ? (0x100 + canid) : ((mode == 2) ? (0x200 + canid) : canid);
 
     uint8_t data[8] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFC};
-    sendStandardFrame(can_id, data);
+    return sendStandardFrame(can_id, data);
 }
 
-void DeviceX::DisableMotor_Type3(int& motor_index) {
+bool DeviceX::DisableMotor_Type3(int& motor_index) {
     const auto& motor = (*p_motors_data)[motor_index];
 
     uint16_t canid = static_cast<uint16_t>(motor.info.canid);
@@ -1989,7 +2019,7 @@ void DeviceX::DisableMotor_Type3(int& motor_index) {
     uint32_t can_id = (mode == 1) ? (0x100 + canid) : ((mode == 2) ? (0x200 + canid) : canid);
 
     uint8_t data[8] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFD};
-    sendStandardFrame(can_id, data);
+    return sendStandardFrame(can_id, data);
 }
 
 void DeviceX::ClearError_Type3(int& motor_index) {
@@ -2014,13 +2044,14 @@ void DeviceX::SetZero_Type3(int& motor_index) {
     sendStandardFrame(can_id, data);
 }
 
-void DeviceX::SetMode_Type3(int& motor_index, int mode) {
+bool DeviceX::SetMode_Type3(int& motor_index, int mode) {
     if (mode < 0) mode = 0;
     if (mode > 3) mode = 3;
     (*p_motors_data)[motor_index].send.mode = static_cast<uint8_t>(mode);
+    return true;
 }
 
-void DeviceX::SendCommand_Type3(int& motor_index) {
+bool DeviceX::SendCommand_Type3(int& motor_index) {
     const Motor_CAN_Struct& motor = (*p_motors_data)[motor_index];
     const auto& cmd = motor.send;
     const auto& info = motor.info;
@@ -2050,23 +2081,24 @@ void DeviceX::SendCommand_Type3(int& motor_index) {
         data[5] = (uint8_t)(kd_int >> 4);
         data[6] = (uint8_t)(((kd_int & 0x0F) << 4) | (t_int >> 8));
         data[7] = (uint8_t)(t_int & 0xFF);
-        sendStandardFrame(can_id, data);
+        return sendStandardFrame(can_id, data);
     } else if (cmd.mode == 1) {
         float p = cmd.position;
         float v = cmd.speed;
         uint32_t can_id = 0x100 + (uint16_t)info.canid;
         std::memcpy(&data[0], &p, 4);
         std::memcpy(&data[4], &v, 4);
-        sendStandardFrame(can_id, data);
+        return sendStandardFrame(can_id, data);
     } else if (cmd.mode == 2) {
         float v = cmd.speed;
         uint32_t can_id = 0x200 + (uint16_t)info.canid;
         std::memcpy(&data[0], &v, 4);
-        sendStandardFrame(can_id, data, 4);
+        return sendStandardFrame(can_id, data, 4);
     }
+    return false;
 }
 
-void DeviceX::QueryPos_Type3(int& motor_index) {
+bool DeviceX::QueryPos_Type3(int& motor_index) {
     const auto& motor = (*p_motors_data)[motor_index];
 
     uint8_t data[8] = {0};
@@ -2075,25 +2107,25 @@ void DeviceX::QueryPos_Type3(int& motor_index) {
     data[1] = static_cast<uint8_t>((canid >> 8) & 0xFF);
     data[2] = 0xCC;
 
-    sendStandardFrame(0x7FF, data);
+    return sendStandardFrame(0x7FF, data);
 }
 
 // =========================================================
 //  Type 5 (HighTorque/高擎)
 // =========================================================
 
-void DeviceX::EnableMotor_Type5(int& motor_index) {
+bool DeviceX::EnableMotor_Type5(int& motor_index) {
     // HighTorque protocol does not expose a dedicated "enable" command in the
     // provided CAN document. We perform a state query to confirm communication.
-    QueryPos_Type5(motor_index);
+    return QueryPos_Type5(motor_index);
 }
 
-void DeviceX::DisableMotor_Type5(int& motor_index) {
+bool DeviceX::DisableMotor_Type5(int& motor_index) {
     const auto& info = (*p_motors_data)[motor_index].info;
     const uint32_t can_id = build_hq_can_id(static_cast<uint8_t>(info.canid), HQ_REPLY_REQUIRED);
     // ref/livelybot_fdcan.c: set_motor_stop_int16()
     const uint8_t tdata[] = {0x01, 0x00, 0x00, 0x14, 0x04, 0x00, 0x11, 0x0F};
-    sendExtendedIdFrame(can_id, tdata, sizeof(tdata));
+    return sendExtendedIdFrame(can_id, tdata, sizeof(tdata));
 }
 
 void DeviceX::ClearError_Type5(int& motor_index) {
@@ -2128,13 +2160,14 @@ void DeviceX::SetZero_Type5(int& motor_index) {
     sendExtendedIdFdFrame(can_id, conf_write_cmd, sizeof(conf_write_cmd));
 }
 
-void DeviceX::SetMode_Type5(int& motor_index, int mode) {
+bool DeviceX::SetMode_Type5(int& motor_index, int mode) {
     if (mode < 0) mode = 0;
     if (mode > 3) mode = 3;
     (*p_motors_data)[motor_index].send.mode = static_cast<uint8_t>(mode);
+    return true;
 }
 
-void DeviceX::SendCommand_Type5(int& motor_index) {
+bool DeviceX::SendCommand_Type5(int& motor_index) {
     const Motor_CAN_Struct& motor = (*p_motors_data)[motor_index];
     const auto& info = motor.info;
     const auto& cmd = motor.send;
@@ -2173,8 +2206,7 @@ void DeviceX::SendCommand_Type5(int& motor_index) {
             write_le_i16(&tdata[2], pos_raw);
             write_le_u16(&tdata[4], unlimited);
             write_le_i16(&tdata[6], tq_ff_raw);
-            sendExtendedIdFrame(can_id, tdata, 8);
-            break;
+            return sendExtendedIdFrame(can_id, tdata, 8);
         }
         case 2: { // velocity + torque, position unlimited
             tdata[0] = 0x07;
@@ -2182,16 +2214,14 @@ void DeviceX::SendCommand_Type5(int& motor_index) {
             write_le_u16(&tdata[2], unlimited);
             write_le_i16(&tdata[4], vel_raw);
             write_le_i16(&tdata[6], tq_ff_raw);
-            sendExtendedIdFrame(can_id, tdata, 8);
-            break;
+            return sendExtendedIdFrame(can_id, tdata, 8);
         }
         case 3: { // torque only
             const int16_t tq_raw = encode_torque_raw(cmd.torque);
             tdata[0] = 0x05;
             tdata[1] = 0x13;
             write_le_i16(&tdata[2], tq_raw);
-            sendExtendedIdFrame(can_id, tdata, 4);
-            break;
+            return sendExtendedIdFrame(can_id, tdata, 4);
         }
         case 0:
         default: { // MIT mode 2 (int16): mode set + pos/vel/tqe + kp/kd + state query
@@ -2230,37 +2260,38 @@ void DeviceX::SendCommand_Type5(int& motor_index) {
 
             fd_data[22] = 0x50;
             fd_data[23] = 0x50;
-            sendExtendedIdFdFrame(can_id, fd_data, sizeof(fd_data));
-            break;
+            return sendExtendedIdFdFrame(can_id, fd_data, sizeof(fd_data));
         }
     }
+    return false;
 }
 
-void DeviceX::QueryPos_Type5(int& motor_index) {
+bool DeviceX::QueryPos_Type5(int& motor_index) {
     const auto& info = (*p_motors_data)[motor_index].info;
     const uint32_t can_id = build_hq_can_id(static_cast<uint8_t>(info.canid), HQ_REPLY_REQUIRED);
     // ref/livelybot_fdcan.c: read_motor_state_int16()
     const uint8_t tdata[] = {0x14, 0x04, 0x00, 0x11, 0x0F};
-    sendExtendedIdFrame(can_id, tdata, sizeof(tdata));
+    return sendExtendedIdFrame(can_id, tdata, sizeof(tdata));
 }
 
 // =========================================================
 //  Type 6 (AgiBot PowerFlow L28/PFL28)
 // =========================================================
 
-void DeviceX::EnableMotor_Type6(int& motor_index) {
+bool DeviceX::EnableMotor_Type6(int& motor_index) {
     // PFL28 powers up in enabled state.
     (void)motor_index;
+    return true;
 }
 
-void DeviceX::DisableMotor_Type6(int& motor_index) {
+bool DeviceX::DisableMotor_Type6(int& motor_index) {
     // No dedicated disable command in PFL28 public protocol.
     // Send a zero-current hold at the latest known position as a safe fallback.
-    if (!p_motors_data) return;
+    if (!p_motors_data) return false;
     auto& motor = (*p_motors_data)[motor_index];
     motor.send.position = motor.recv.current_position_f.load();
     motor.send.torque = 0.0f;
-    SendCommand_Type6(motor_index);
+    return SendCommand_Type6(motor_index);
 }
 
 void DeviceX::ClearError_Type6(int& motor_index) {
@@ -2273,21 +2304,25 @@ void DeviceX::SetZero_Type6(int& motor_index) {
     (void)motor_index;
 }
 
-void DeviceX::SetMode_Type6(int& motor_index, int mode) {
+bool DeviceX::SetMode_Type6(int& motor_index, int mode) {
     // PFL28 uses position/current command frame; keep mode for compatibility.
     (*p_motors_data)[motor_index].send.mode = static_cast<uint8_t>(mode);
+    return true;
 }
 
-void DeviceX::SendCommand_Type6(int& motor_index) {
+bool DeviceX::SendCommand_Type6(int& motor_index) {
     const auto& motor = (*p_motors_data)[motor_index];
     const auto& info = motor.info;
-    const bool allow_neg_i = pfl28_allow_neg_current();
+
+    if (pfl28_use_canfd_frame() && pfl28_use_xyber_mode() && info.canid >= 1 && info.canid <= 8) {
+        return SendCommand_Type6_XyberBroadcast(motor_index);
+    }
 
     const float pos_min = (info.p_max > info.p_min) ? info.p_min : 0.0f;
     const float pos_max = (info.p_max > info.p_min) ? info.p_max : 9.5f;
     const float cur_max = (info.t_max > info.t_min) ? info.t_max : 2.5f;
     float cur_min = (info.t_max > info.t_min) ? info.t_min : 0.0f;
-    if (allow_neg_i && cur_min >= 0.0f) {
+    if (pfl28_allow_neg_current() && cur_min >= 0.0f) {
         cur_min = -cur_max;
     }
 
@@ -2300,50 +2335,96 @@ void DeviceX::SendCommand_Type6(int& motor_index) {
     pos_cmd = std::max(pos_min, std::min(pos_max, pos_cmd));
     cur_cmd = std::max(cur_min, std::min(cur_max, cur_cmd));
 
-    if (pfl28_use_canfd_frame()) {
-        if (pfl28_use_xyber_mode() && info.canid >= 1 && info.canid <= 8) {
-            uint8_t data[64] = {0};
-            const std::size_t offset = static_cast<std::size_t>(info.canid - 1) * 8U;
-            std::memcpy(&data[offset], &pos_cmd, sizeof(float));       // little-endian float
-            std::memcpy(&data[offset + 4], &cur_cmd, sizeof(float));   // little-endian float
-            sendStandardFdFrame(0, data, sizeof(data), pfl28_use_canfd_brs());
-        } else {
-            uint8_t data[8] = {0};
-            std::memcpy(&data[0], &pos_cmd, sizeof(float)); // little-endian float
-            std::memcpy(&data[4], &cur_cmd, sizeof(float)); // little-endian float
-            sendStandardFdFrame(static_cast<uint32_t>(info.canid), data, sizeof(data), pfl28_use_canfd_brs());
-        }
-    } else {
-        uint8_t data[8] = {0};
-        std::memcpy(&data[0], &pos_cmd, sizeof(float)); // little-endian float
-        std::memcpy(&data[4], &cur_cmd, sizeof(float)); // little-endian float
-        sendStandardFrame(static_cast<uint32_t>(info.canid), data, sizeof(data));
+    if (!pfl28_use_canfd_frame()) {
+        std::cerr << "[Error] PFL28 point-to-point protocol requires CAN FD." << std::endl;
+        return false;
     }
+
+    uint8_t data[8] = {0};
+    std::memcpy(&data[0], &pos_cmd, sizeof(float));
+    std::memcpy(&data[4], &cur_cmd, sizeof(float));
+    return sendStandardFdFrame(static_cast<uint32_t>(info.canid), data, sizeof(data), pfl28_use_canfd_brs());
 }
 
-void DeviceX::QueryPos_Type6(int& motor_index) {
+namespace {
+
+void appendPfl28XyberSlot(
+    const Motor_CAN_Struct& motor,
+    uint8_t* data,
+    bool allow_neg_i) {
+    const auto& info = motor.info;
+    const float pos_min = (info.p_max > info.p_min) ? info.p_min : 0.0f;
+    const float pos_max = (info.p_max > info.p_min) ? info.p_max : 9.5f;
+    const float cur_max = (info.t_max > info.t_min) ? info.t_max : 2.5f;
+    float cur_min = (info.t_max > info.t_min) ? info.t_min : 0.0f;
+    if (allow_neg_i && cur_min >= 0.0f) {
+        cur_min = -cur_max;
+    }
+
+    float pos_cmd = motor.send.position;
+    float cur_cmd = motor.send.torque;
+    if (!std::isfinite(pos_cmd)) pos_cmd = 0.0f;
+    if (!std::isfinite(cur_cmd)) cur_cmd = 0.0f;
+    pos_cmd = std::max(pos_min, std::min(pos_max, pos_cmd));
+    cur_cmd = std::max(cur_min, std::min(cur_max, cur_cmd));
+
+    const std::size_t offset = static_cast<std::size_t>(info.canid - 1) * 8U;
+    std::memcpy(&data[offset], &pos_cmd, sizeof(float));
+    std::memcpy(&data[offset + 4], &cur_cmd, sizeof(float));
+}
+
+}  // namespace
+
+bool DeviceX::SendCommand_Type6_XyberBroadcast(int& motor_index) {
+    if (!p_motors_data || motor_index < 0 ||
+        motor_index >= static_cast<int>(p_motors_data->size())) {
+        return false;
+    }
+
+    const auto& motor = (*p_motors_data)[motor_index];
+    const auto& info = motor.info;
+    uint8_t data[64] = {0};
+    const bool allow_neg_i = pfl28_allow_neg_current();
+    bool has_slot = false;
+
+    for (const auto& other : *p_motors_data) {
+        if (other.info.api_type == 6 &&
+            other.info.device_index == info.device_index &&
+            other.info.canid >= 1 &&
+            other.info.canid <= 8) {
+            appendPfl28XyberSlot(other, data, allow_neg_i);
+            has_slot = true;
+        }
+    }
+
+    if (!has_slot) {
+        return false;
+    }
+    return sendStandardFdFrame(0, data, sizeof(data), pfl28_use_canfd_brs());
+}
+
+bool DeviceX::QueryPos_Type6(int& motor_index) {
     // PFL28 returns state after each control frame; no standalone query frame documented.
     // We keep this as no-op to avoid accidental motion during status polling loops.
     (void)motor_index;
+    return true;
 }
 
 // =========================================================
 //  Type 7 (Haitai/海泰)
 // =========================================================
 
-void DeviceX::EnableMotor_Type7(int& motor_index) {
-    const auto& info = (*p_motors_data)[motor_index].info;
-    const HaitaiCommandFrame status_frame = make_haitai_simple_query(0xAE, static_cast<uint32_t>(info.canid));
-    sendStandardFrame(status_frame.can_id, status_frame.data.data(), status_frame.dlc);
-
-    const HaitaiCommandFrame limits_frame = make_haitai_simple_query(0xF0, static_cast<uint32_t>(info.canid));
-    sendStandardFrame(limits_frame.can_id, limits_frame.data.data(), limits_frame.dlc);
+bool DeviceX::EnableMotor_Type7(int& motor_index) {
+    // Haitai MIT/status policy is owned by the caller/node. Keep enable passive
+    // so construction or mode switches never write 0xF0 implicitly.
+    (void)motor_index;
+    return true;
 }
 
-void DeviceX::DisableMotor_Type7(int& motor_index) {
+bool DeviceX::DisableMotor_Type7(int& motor_index) {
     const auto& info = (*p_motors_data)[motor_index].info;
     const HaitaiCommandFrame frame = make_haitai_simple_query(0xCF, static_cast<uint32_t>(info.canid));
-    sendStandardFrame(frame.can_id, frame.data.data(), frame.dlc);
+    return sendStandardFrame(frame.can_id, frame.data.data(), frame.dlc);
 }
 
 void DeviceX::ClearError_Type7(int& motor_index) {
@@ -2358,33 +2439,39 @@ void DeviceX::SetZero_Type7(int& motor_index) {
     sendStandardFrame(frame.can_id, frame.data.data(), frame.dlc);
 }
 
-void DeviceX::SetMode_Type7(int& motor_index, int mode) {
+bool DeviceX::SetMode_Type7(int& motor_index, int mode) {
     if (mode < 0) mode = 0;
     if (mode > 4) mode = 4;
     auto& motor = (*p_motors_data)[motor_index];
     motor.send.mode = static_cast<uint8_t>(mode);
-
-    if (mode == 4) {
-        const auto& info = motor.info;
-        const float pos_max = (info.p_max > 0.0f) ? info.p_max : HAITAI_MIT_DEFAULT_POS_MAX_RAD;
-        const float vel_max = (info.v_max > 0.0f) ? info.v_max : HAITAI_MIT_DEFAULT_VEL_MAX_RAD_S;
-        const float torque_max = (info.t_max > 0.0f) ? info.t_max : HAITAI_MIT_DEFAULT_TORQUE_MAX_NM;
-
-        const HaitaiCommandFrame limits_frame = build_haitai_mit_limits_config(
-            pos_max,
-            vel_max,
-            torque_max,
-            static_cast<uint32_t>(info.canid));
-        sendStandardFrame(limits_frame.can_id, limits_frame.data.data(), limits_frame.dlc);
-
-        motor.recv.haitai_mit_limits_valid = true;
-        motor.recv.haitai_mit_pos_max_rad = pos_max;
-        motor.recv.haitai_mit_vel_max_rad_s = vel_max;
-        motor.recv.haitai_mit_torque_max_nm = torque_max;
-    }
+    return true;
 }
 
-void DeviceX::SendCommand_Type7(int& motor_index) {
+bool DeviceX::ConfigureHaitaiMitLimits(int& motor_index) {
+    if (!p_motors_data || motor_index < 0 ||
+        static_cast<std::size_t>(motor_index) >= p_motors_data->size()) {
+        return false;
+    }
+
+    auto& motor = (*p_motors_data)[motor_index];
+    const auto& info = motor.info;
+    if (info.api_type != 7) {
+        return false;
+    }
+
+    const float pos_max = (info.p_max > 0.0f) ? info.p_max : HAITAI_MIT_DEFAULT_POS_MAX_RAD;
+    const float vel_max = (info.v_max > 0.0f) ? info.v_max : HAITAI_MIT_DEFAULT_VEL_MAX_RAD_S;
+    const float torque_max = (info.t_max > 0.0f) ? info.t_max : HAITAI_MIT_DEFAULT_TORQUE_MAX_NM;
+
+    const HaitaiCommandFrame limits_frame = build_haitai_mit_limits_config(
+        pos_max,
+        vel_max,
+        torque_max,
+        static_cast<uint32_t>(info.canid));
+    return sendStandardFrame(limits_frame.can_id, limits_frame.data.data(), limits_frame.dlc);
+}
+
+bool DeviceX::SendCommand_Type7(int& motor_index) {
     const auto& motor = (*p_motors_data)[motor_index];
     const auto& info = motor.info;
     const auto& cmd = motor.send;
@@ -2416,13 +2503,13 @@ void DeviceX::SendCommand_Type7(int& motor_index) {
             cmd.torque,
             static_cast<uint32_t>(info.canid));
     }
-    sendStandardFrame(frame.can_id, frame.data.data(), frame.dlc);
+    return sendStandardFrame(frame.can_id, frame.data.data(), frame.dlc);
 }
 
-void DeviceX::QueryPos_Type7(int& motor_index) {
+bool DeviceX::QueryPos_Type7(int& motor_index) {
     const auto& info = (*p_motors_data)[motor_index].info;
     const HaitaiCommandFrame frame = make_haitai_simple_query(0xA4, static_cast<uint32_t>(info.canid));
-    sendStandardFrame(frame.can_id, frame.data.data(), frame.dlc);
+    return sendStandardFrame(frame.can_id, frame.data.data(), frame.dlc);
 }
 
 void DeviceX::QueryVersion_Type7(int& motor_index) {
@@ -2435,22 +2522,23 @@ void DeviceX::QueryVersion_Type7(int& motor_index) {
 //  Type 8 (ENCOS EC-A series)
 // =========================================================
 
-void DeviceX::EnableMotor_Type8(int& motor_index) {
+bool DeviceX::EnableMotor_Type8(int& motor_index) {
     const auto& info = (*p_motors_data)[motor_index].info;
     const encos::CommandFrame release =
         encos::make_brake_release_command(static_cast<uint32_t>(info.canid));
-    sendStandardFrame(release.can_id, release.data.data(), release.dlc);
+    const bool release_ok = sendStandardFrame(release.can_id, release.data.data(), release.dlc);
     std::this_thread::sleep_for(std::chrono::milliseconds(2));
     const encos::CommandFrame current_zero =
         encos::make_current_zero_command(static_cast<uint32_t>(info.canid));
-    sendStandardFrame(current_zero.can_id, current_zero.data.data(), current_zero.dlc);
+    const bool zero_ok = sendStandardFrame(current_zero.can_id, current_zero.data.data(), current_zero.dlc);
+    return release_ok && zero_ok;
 }
 
-void DeviceX::DisableMotor_Type8(int& motor_index) {
+bool DeviceX::DisableMotor_Type8(int& motor_index) {
     const auto& info = (*p_motors_data)[motor_index].info;
     const encos::CommandFrame frame =
         encos::make_damping_command(static_cast<uint32_t>(info.canid));
-    sendStandardFrame(frame.can_id, frame.data.data(), frame.dlc);
+    return sendStandardFrame(frame.can_id, frame.data.data(), frame.dlc);
 }
 
 void DeviceX::ClearError_Type8(int& motor_index) {
@@ -2467,13 +2555,14 @@ void DeviceX::SetZero_Type8(int& motor_index) {
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
 }
 
-void DeviceX::SetMode_Type8(int& motor_index, int mode) {
+bool DeviceX::SetMode_Type8(int& motor_index, int mode) {
     if (mode < 0) mode = 0;
     if (mode > 3) mode = 3;
     (*p_motors_data)[motor_index].send.mode = static_cast<uint8_t>(mode);
+    return true;
 }
 
-void DeviceX::SendCommand_Type8(int& motor_index) {
+bool DeviceX::SendCommand_Type8(int& motor_index) {
     const auto& motor = (*p_motors_data)[motor_index];
     const auto& info = motor.info;
     const auto& cmd = motor.send;
@@ -2494,17 +2583,18 @@ void DeviceX::SendCommand_Type8(int& motor_index) {
         frame = encos::make_torque_command(
             can_id, limits, cmd.torque);
     }
-    sendStandardFrame(frame.can_id, frame.data.data(), frame.dlc);
+    return sendStandardFrame(frame.can_id, frame.data.data(), frame.dlc);
 }
 
-void DeviceX::QueryPos_Type8(int& motor_index) {
+bool DeviceX::QueryPos_Type8(int& motor_index) {
     const auto& info = (*p_motors_data)[motor_index].info;
     const uint32_t can_id = static_cast<uint32_t>(info.canid);
     const encos::CommandFrame pos_query = encos::make_query_command(can_id, 1);
-    sendStandardFrame(pos_query.can_id, pos_query.data.data(), pos_query.dlc);
+    const bool pos_ok = sendStandardFrame(pos_query.can_id, pos_query.data.data(), pos_query.dlc);
     std::this_thread::sleep_for(std::chrono::microseconds(100));
     const encos::CommandFrame speed_query = encos::make_query_command(can_id, 2);
-    sendStandardFrame(speed_query.can_id, speed_query.data.data(), speed_query.dlc);
+    const bool speed_ok = sendStandardFrame(speed_query.can_id, speed_query.data.data(), speed_query.dlc);
+    return pos_ok && speed_ok;
 }
 
 // =========================================================
@@ -2756,11 +2846,13 @@ void DeviceX::ReceiveLoop() {
                 motor.recv.haitai_mit_fault = feedback.mit_fault;
                 motor.recv.mode = 4;
                 motor.recv.fault_message = feedback.fault;
+                motor.recv.haitai_fault_source_command = feedback.command;
                 motor.recv.motor_state = 1;
             }
             if (feedback.has_status) {
                 motor.recv.mode = feedback.mode;
                 motor.recv.fault_message = feedback.fault;
+                motor.recv.haitai_fault_source_command = feedback.command;
                 motor.recv.motor_state = 1;
             }
 
@@ -2772,7 +2864,8 @@ void DeviceX::ReceiveLoop() {
                 motor.recv.motor_state = 1;
                 motor.recv.mode = motor.send.mode;
                 if (std::fabs(motor.recv.current_position_f.load()) < 1e-6f) {
-                    motor.recv.current_position_f.store(static_cast<float>(angle_single) * HAITAI_COUNT_TO_RAD);
+                    const float single_turn_rad = static_cast<float>(angle_single) * HAITAI_COUNT_TO_RAD;
+                    motor.recv.current_position_f.store(haitai_wrap_to_signed_pi(single_turn_rad));
                 }
             } else if ((feedback.command == 0xA1 || feedback.command == 0xC0 ||
                         feedback.command == 0xA2 || feedback.command == 0xC1)) {
@@ -2791,6 +2884,7 @@ void DeviceX::ReceiveLoop() {
             }
 
             motor.recv.motor_id = static_cast<uint8_t>(parsed_motor_id);
+            motor.recv.feedback_sequence.fetch_add(1, std::memory_order_relaxed);
         } else if (motor.info.api_type == 8 && !(frame.can_id & CAN_EFF_FLAG)) {
             const encos::Feedback feedback = encos::parse_feedback(
                 frame.data, frame_len, encos::limits_from_info(motor.info));

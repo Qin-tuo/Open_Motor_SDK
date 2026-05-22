@@ -43,6 +43,9 @@ MotorMapper::MotorMapper(std::vector<uint> dimension_limits, std::vector<std::ve
 }
 
 int MotorMapper::get_id(const std::vector<uint>& loc) const {
+    if (loc.size() != _num_dims) {
+        return -1;
+    }
     uint flat_index = _calculate_flat_index(loc);
     if (flat_index < _loc_to_id_lut.size()) {
         return _loc_to_id_lut[flat_index];
@@ -59,6 +62,9 @@ std::vector<uint> MotorMapper::get_loc(uint uid) const {
     std::vector<uint> result;
     result.reserve(_num_dims);
     for (uint i = 0; i < _num_dims; ++i) {
+        if (static_cast<std::size_t>(start_offset) + i >= _coord_pool.size()) {
+            return {};
+        }
         result.push_back(_coord_pool[start_offset + i]);
     }
     return result;
