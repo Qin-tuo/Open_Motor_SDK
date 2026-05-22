@@ -20,8 +20,13 @@
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 #include <thread>
+
+#include <fcntl.h>
+#include <sys/select.h>
+#include <termios.h>
 
 namespace encos {
 
@@ -265,6 +270,15 @@ CommandFrame make_current_zero_command(uint32_t can_id) {
     return frame;
 }
 
+CommandFrame make_set_zero_command(uint32_t motor_id) {
+    CommandFrame frame = make_frame(0x7FF, 4);
+    frame.data[0] = static_cast<uint8_t>((motor_id >> 8) & 0xFF);
+    frame.data[1] = static_cast<uint8_t>(motor_id & 0xFF);
+    frame.data[2] = 0x00;
+    frame.data[3] = 0x03;
+    return frame;
+}
+
 CommandFrame make_damping_command(uint32_t can_id) {
     CommandFrame frame = make_frame(can_id, 3);
     frame.data[0] = pack_mode_state_ack(MODE_CUR_TOR, CUR_STATE_DAMPING, ACK_NONE);
@@ -426,6 +440,745 @@ Feedback parse_feedback(const uint8_t* data, uint8_t len, const Limits& limits) 
 }
 
 }  // namespace encos
+
+namespace {
+
+constexpr float kHaitaiTwoPi = 6.28318530718f;
+constexpr float kHaitaiCountPerTurn = 16384.0f;
+constexpr float kHaitaiSpeedScale = 100.0f;    // 0.01 rpm
+constexpr float kHaitaiCurrentScale = 1000.0f; // 0.001 A
+constexpr float kHaitaiMitKpMax = 500.0f;
+constexpr float kHaitaiMitKdMax = 5.0f;
+
+int32_t haitai_clamp_i32(float value) {
+    const float hi = static_cast<float>(std::numeric_limits<int32_t>::max());
+    const float lo = static_cast<float>(std::numeric_limits<int32_t>::min());
+    if (value > hi) value = hi;
+    if (value < lo) value = lo;
+    return static_cast<int32_t>(std::lround(value));
+}
+
+uint16_t haitai_clamp_u16(float value) {
+    if (value < 0.0f) value = 0.0f;
+    if (value > static_cast<float>(std::numeric_limits<uint16_t>::max())) {
+        value = static_cast<float>(std::numeric_limits<uint16_t>::max());
+    }
+    return static_cast<uint16_t>(std::lround(value));
+}
+
+void haitai_write_le_i32(uint8_t* dst, int32_t value) {
+    const uint32_t raw = static_cast<uint32_t>(value);
+    dst[0] = static_cast<uint8_t>(raw & 0xFF);
+    dst[1] = static_cast<uint8_t>((raw >> 8) & 0xFF);
+    dst[2] = static_cast<uint8_t>((raw >> 16) & 0xFF);
+    dst[3] = static_cast<uint8_t>((raw >> 24) & 0xFF);
+}
+
+void haitai_write_le_u16(uint8_t* dst, uint16_t value) {
+    dst[0] = static_cast<uint8_t>(value & 0xFF);
+    dst[1] = static_cast<uint8_t>((value >> 8) & 0xFF);
+}
+
+int32_t haitai_read_le_i32(const uint8_t* src) {
+    const uint32_t raw = static_cast<uint32_t>(src[0]) |
+                         (static_cast<uint32_t>(src[1]) << 8) |
+                         (static_cast<uint32_t>(src[2]) << 16) |
+                         (static_cast<uint32_t>(src[3]) << 24);
+    return static_cast<int32_t>(raw);
+}
+
+uint16_t haitai_read_le_u16(const uint8_t* src) {
+    return static_cast<uint16_t>(src[0]) |
+           (static_cast<uint16_t>(src[1]) << 8);
+}
+
+int16_t haitai_read_le_i16(const uint8_t* src) {
+    return static_cast<int16_t>(haitai_read_le_u16(src));
+}
+
+int32_t haitai_rad_to_count(float rad) {
+    return haitai_clamp_i32(rad * (kHaitaiCountPerTurn / kHaitaiTwoPi));
+}
+
+int32_t haitai_rad_s_to_rpm_x100(float rad_s) {
+    return haitai_clamp_i32(rad_s * (60.0f / kHaitaiTwoPi) * kHaitaiSpeedScale);
+}
+
+int32_t haitai_amp_to_milliamp(float amp) {
+    return haitai_clamp_i32(amp * kHaitaiCurrentScale);
+}
+
+float haitai_count_to_rad(int32_t count) {
+    return static_cast<float>(count) * (kHaitaiTwoPi / kHaitaiCountPerTurn);
+}
+
+float haitai_rpm_x100_to_rad_s(int32_t raw) {
+    const float rpm = static_cast<float>(raw) / kHaitaiSpeedScale;
+    return rpm * (kHaitaiTwoPi / 60.0f);
+}
+
+float haitai_milliamp_to_amp(int32_t raw) {
+    return static_cast<float>(raw) / kHaitaiCurrentScale;
+}
+
+uint32_t haitai_float_to_uint(float value, float min_value, float max_value, uint8_t bits) {
+    if (max_value <= min_value) {
+        return 0;
+    }
+    if (value < min_value) value = min_value;
+    if (value > max_value) value = max_value;
+
+    const uint32_t max_raw = (1U << bits) - 1U;
+    const float span = max_value - min_value;
+    const float scaled = (value - min_value) * static_cast<float>(max_raw) / span;
+    return static_cast<uint32_t>(std::lround(scaled));
+}
+
+float haitai_uint_to_float(uint32_t raw, float min_value, float max_value, uint8_t bits) {
+    const uint32_t max_raw = (1U << bits) - 1U;
+    const float span = max_value - min_value;
+    return static_cast<float>(raw) * span / static_cast<float>(max_raw) + min_value;
+}
+
+constexpr int kFeetechSCSPositionMax = 1023;
+constexpr float kFeetechSCS0037RangeRad = 4.712389f; // 270 deg
+constexpr float kFeetechRpmToRadS = 6.28318530718f / 60.0f;
+constexpr int kFeetechReadTimeoutMs = 100;
+
+constexpr uint8_t kFeetechInstRead = 0x02;
+constexpr uint8_t kFeetechInstWrite = 0x03;
+
+constexpr uint8_t kFeetechServoIdAddr = 5;
+constexpr uint8_t kFeetechTorqueEnableAddr = 40;
+constexpr uint8_t kFeetechGoalPositionAddr = 42;
+constexpr uint8_t kFeetechEepromLockAddr = 48;
+constexpr uint8_t kFeetechPresentPositionAddr = 56;
+constexpr uint8_t kFeetechPresentSpeedAddr = 58;
+constexpr uint8_t kFeetechPresentLoadAddr = 60;
+constexpr uint8_t kFeetechPresentTemperatureAddr = 63;
+
+bool feetech_valid_motor_index(const std::vector<Motor_CAN_Struct>* motors, int idx) {
+    return motors && idx >= 0 && static_cast<std::size_t>(idx) < motors->size();
+}
+
+speed_t feetech_baud_to_termios(int baud) {
+    switch (baud) {
+        case 9600: return B9600;
+        case 19200: return B19200;
+        case 38400: return B38400;
+        case 57600: return B57600;
+        case 115200: return B115200;
+        case 230400: return B230400;
+        case 500000: return B500000;
+        case 1000000: return B1000000;
+        default: return B500000;
+    }
+}
+
+uint8_t feetech_checksum(const uint8_t* data, std::size_t length) {
+    uint8_t sum = 0;
+    for (std::size_t i = 0; i < length; ++i) {
+        sum = static_cast<uint8_t>(sum + data[i]);
+    }
+    return static_cast<uint8_t>(~sum);
+}
+
+void feetech_write_be_u16(uint8_t* out, int value) {
+    const uint16_t v = static_cast<uint16_t>(std::max(0, std::min(0xFFFF, value)));
+    out[0] = static_cast<uint8_t>((v >> 8) & 0xFF);
+    out[1] = static_cast<uint8_t>(v & 0xFF);
+}
+
+int feetech_read_be_u16(const uint8_t* data) {
+    return (static_cast<int>(data[0]) << 8) | static_cast<int>(data[1]);
+}
+
+}  // namespace
+
+HaitaiCommandFrame build_haitai_command(uint8_t mode, float position_rad,
+                                        float speed_rad_s, float current_a,
+                                        uint32_t can_id) {
+    HaitaiCommandFrame frame {};
+    frame.can_id = can_id & 0x7FFU;
+    frame.dlc = 5;
+
+    uint8_t cmd = 0xC2;
+    int32_t value = haitai_rad_to_count(position_rad);
+
+    switch (mode) {
+        case 1:
+            cmd = 0xC0;
+            value = haitai_amp_to_milliamp(current_a);
+            break;
+        case 2:
+            cmd = 0xC1;
+            value = haitai_rad_s_to_rpm_x100(speed_rad_s);
+            break;
+        case 3:
+            cmd = 0xC3;
+            value = haitai_rad_to_count(position_rad);
+            break;
+        case 0:
+        default:
+            cmd = 0xC2;
+            value = haitai_rad_to_count(position_rad);
+            break;
+    }
+
+    frame.data[0] = cmd;
+    haitai_write_le_i32(&frame.data[1], value);
+    return frame;
+}
+
+HaitaiCommandFrame build_haitai_mit_command(float position_rad, float speed_rad_s,
+                                            float kp, float kd, float torque_nm,
+                                            float pos_max_rad,
+                                            float vel_max_rad_s,
+                                            float torque_max_nm,
+                                            uint32_t can_id) {
+    HaitaiCommandFrame frame {};
+    const uint32_t node_id = can_id & 0x7FFU;
+    frame.can_id = 0x400U | node_id;
+    frame.dlc = 8;
+
+    const uint32_t pos_raw = haitai_float_to_uint(position_rad, -pos_max_rad, pos_max_rad, 16);
+    const uint32_t vel_raw = haitai_float_to_uint(speed_rad_s, -vel_max_rad_s, vel_max_rad_s, 12);
+    const uint32_t kp_raw = haitai_float_to_uint(kp, 0.0f, kHaitaiMitKpMax, 12);
+    const uint32_t kd_raw = haitai_float_to_uint(kd, 0.0f, kHaitaiMitKdMax, 12);
+    const uint32_t torque_raw = haitai_float_to_uint(torque_nm, -torque_max_nm, torque_max_nm, 12);
+
+    frame.data[0] = static_cast<uint8_t>((pos_raw >> 8) & 0xFF);
+    frame.data[1] = static_cast<uint8_t>(pos_raw & 0xFF);
+    frame.data[2] = static_cast<uint8_t>((vel_raw >> 4) & 0xFF);
+    frame.data[3] = static_cast<uint8_t>(((vel_raw & 0x0F) << 4) | ((kp_raw >> 8) & 0x0F));
+    frame.data[4] = static_cast<uint8_t>(kp_raw & 0xFF);
+    frame.data[5] = static_cast<uint8_t>((kd_raw >> 4) & 0xFF);
+    frame.data[6] = static_cast<uint8_t>(((kd_raw & 0x0F) << 4) | ((torque_raw >> 8) & 0x0F));
+    frame.data[7] = static_cast<uint8_t>(torque_raw & 0xFF);
+
+    return frame;
+}
+
+HaitaiCommandFrame build_haitai_mit_limits_config(float pos_max_rad,
+                                                  float vel_max_rad_s,
+                                                  float torque_max_nm,
+                                                  uint32_t can_id) {
+    HaitaiCommandFrame frame {};
+    frame.can_id = can_id & 0x7FFU;
+    frame.dlc = 7;
+    frame.data[0] = 0xF0;
+    haitai_write_le_u16(&frame.data[1], haitai_clamp_u16(pos_max_rad * 10.0f));
+    haitai_write_le_u16(&frame.data[3], haitai_clamp_u16(vel_max_rad_s * 100.0f));
+    haitai_write_le_u16(&frame.data[5], haitai_clamp_u16(torque_max_nm * 100.0f));
+    return frame;
+}
+
+HaitaiCommandFrame make_haitai_simple_query(uint8_t cmd, uint32_t can_id) {
+    HaitaiCommandFrame frame {};
+    frame.can_id = can_id & 0x7FFU;
+    frame.dlc = 1;
+    frame.data[0] = cmd;
+    return frame;
+}
+
+bool parse_haitai_feedback(uint32_t can_id, const std::array<uint8_t, 8>& data,
+                           uint8_t dlc, HaitaiFeedback& out,
+                           float mit_pos_max_rad,
+                           float mit_vel_max_rad_s,
+                           float mit_torque_max_nm) {
+    (void)can_id;
+    if (dlc == 0 || dlc > data.size()) {
+        return false;
+    }
+
+    out = HaitaiFeedback {};
+    out.command = data[0];
+
+    switch (data[0]) {
+        case 0xA0:
+            if (dlc != 8) return false;
+            out.has_version = true;
+            out.boot_version = haitai_read_le_u16(&data[1]);
+            out.app_version = haitai_read_le_u16(&data[3]);
+            out.hw_version = haitai_read_le_u16(&data[5]);
+            out.can_proto_version = data[7];
+            return true;
+        case 0xA1:
+        case 0xC0:
+            if (dlc != 5) return false;
+            out.has_current = true;
+            out.current_a = haitai_milliamp_to_amp(haitai_read_le_i32(&data[1]));
+            return true;
+        case 0xA2:
+        case 0xC1:
+            if (dlc != 5) return false;
+            out.has_speed = true;
+            out.speed_rad_s = haitai_rpm_x100_to_rad_s(haitai_read_le_i32(&data[1]));
+            return true;
+        case 0xA3:
+        case 0xC2:
+        case 0xC3:
+        case 0xC4:
+            if (dlc != 7) return false;
+            out.has_position = true;
+            out.position_rad = haitai_count_to_rad(haitai_read_le_i32(&data[3]));
+            return true;
+        case 0xA4:
+            if (dlc != 8) return false;
+            out.has_temperature = true;
+            out.has_current = true;
+            out.has_speed = true;
+            out.has_position = true;
+            out.temperature_c = static_cast<float>(data[1]);
+            out.current_a = haitai_milliamp_to_amp(haitai_read_le_i16(&data[2]));
+            out.speed_rad_s = haitai_rpm_x100_to_rad_s(haitai_read_le_i16(&data[4]));
+            out.position_rad = haitai_count_to_rad(haitai_read_le_u16(&data[6]));
+            return true;
+        case 0xAE:
+        case 0xCF:
+            if (dlc != 8) return false;
+            out.has_status = true;
+            out.has_temperature = true;
+            out.bus_voltage_v = static_cast<float>(haitai_read_le_u16(&data[1])) / 100.0f;
+            out.bus_current_a = static_cast<float>(haitai_read_le_u16(&data[3])) / 100.0f;
+            out.temperature_c = static_cast<float>(data[5]);
+            out.mode = data[6];
+            out.fault = data[7];
+            return true;
+        case 0xAF:
+            if (dlc != 2) return false;
+            out.has_status = true;
+            out.fault = data[1];
+            return true;
+        case 0xB1:
+            return dlc == 3;
+        case 0xF0:
+            if (dlc != 7) return false;
+            out.has_mit_limits = true;
+            out.mit_pos_max_rad = static_cast<float>(haitai_read_le_u16(&data[1])) * 0.1f;
+            out.mit_vel_max_rad_s = static_cast<float>(haitai_read_le_u16(&data[3])) * 0.01f;
+            out.mit_torque_max_nm = static_cast<float>(haitai_read_le_u16(&data[5])) * 0.01f;
+            return true;
+        case 0xF1: {
+            if (dlc != 7) return false;
+            const uint32_t pos_raw = (static_cast<uint32_t>(data[1]) << 8) |
+                                     static_cast<uint32_t>(data[2]);
+            const uint32_t vel_raw = (static_cast<uint32_t>(data[3]) << 4) |
+                                     (static_cast<uint32_t>(data[4]) >> 4);
+            const uint32_t torque_raw = ((static_cast<uint32_t>(data[4]) & 0x0F) << 8) |
+                                         static_cast<uint32_t>(data[5]);
+            out.has_mit_state = true;
+            out.has_position = true;
+            out.has_speed = true;
+            out.has_torque = true;
+            out.position_rad = haitai_uint_to_float(pos_raw, -mit_pos_max_rad, mit_pos_max_rad, 16);
+            out.speed_rad_s = haitai_uint_to_float(vel_raw, -mit_vel_max_rad_s, mit_vel_max_rad_s, 12);
+            out.torque_nm = haitai_uint_to_float(torque_raw, -mit_torque_max_nm, mit_torque_max_nm, 12);
+            out.mit_status = data[6];
+            out.mit_in_mode = (out.mit_status & 0x01U) != 0;
+            out.mit_fault = (out.mit_status & 0x02U) != 0;
+            out.mode = out.mit_in_mode ? 4 : 0;
+            out.fault = out.mit_fault ? 1 : 0;
+            return true;
+        }
+        default:
+            return false;
+    }
+}
+
+FeetechServoDevice::~FeetechServoDevice() {
+    closeSerial();
+}
+
+bool FeetechServoDevice::Init(const std::string& port, int baud, int dev_idx,
+                              std::vector<Motor_CAN_Struct>* data_ptr,
+                              TopoMapper* mapper_ptr) {
+    port_ = port;
+    baud_ = baud;
+    device_global_index_ = dev_idx;
+    p_motors_data_ = data_ptr;
+    p_mapper_ = mapper_ptr;
+
+    is_open_ = openSerial();
+    if (!is_open_) {
+        std::cerr << "[Error] Failed to open Feetech serial port " << port_
+                  << " at " << baud_ << " baud." << std::endl;
+        return false;
+    }
+
+    std::cout << "[Info] Feetech serial ready on " << port_
+              << " @ " << baud_ << std::endl;
+    return true;
+}
+
+bool FeetechServoDevice::openSerial() {
+    closeSerial();
+    if (port_.empty()) {
+        return false;
+    }
+
+    fd_ = open(port_.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
+    if (fd_ < 0) {
+        std::cerr << "[Error] open(" << port_ << "): " << std::strerror(errno) << std::endl;
+        return false;
+    }
+
+    termios options {};
+    if (tcgetattr(fd_, &options) != 0) {
+        std::cerr << "[Error] tcgetattr(" << port_ << "): " << std::strerror(errno) << std::endl;
+        closeSerial();
+        return false;
+    }
+
+    cfmakeraw(&options);
+    const speed_t termios_baud = feetech_baud_to_termios(baud_);
+    cfsetispeed(&options, termios_baud);
+    cfsetospeed(&options, termios_baud);
+    options.c_cflag &= ~PARENB;
+    options.c_cflag &= ~CSTOPB;
+    options.c_cflag &= ~CSIZE;
+    options.c_cflag |= CS8 | CREAD | CLOCAL;
+    options.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
+    options.c_cc[VMIN] = 0;
+    options.c_cc[VTIME] = 0;
+
+    if (tcsetattr(fd_, TCSANOW, &options) != 0) {
+        std::cerr << "[Error] tcsetattr(" << port_ << "): " << std::strerror(errno) << std::endl;
+        closeSerial();
+        return false;
+    }
+
+    tcflush(fd_, TCIOFLUSH);
+    return true;
+}
+
+void FeetechServoDevice::closeSerial() {
+    if (fd_ >= 0) {
+        close(fd_);
+        fd_ = -1;
+    }
+    is_open_ = false;
+}
+
+int FeetechServoDevice::positionToCount(const Motor_CAN_Info_Struct& info,
+                                        float position_rad) const {
+    const float pos_min = (info.p_max > info.p_min) ? info.p_min : 0.0f;
+    const float pos_max = (info.p_max > info.p_min) ? info.p_max : kFeetechSCS0037RangeRad;
+    position_rad = std::max(pos_min, std::min(pos_max, position_rad));
+    const float ratio = (position_rad - pos_min) / (pos_max - pos_min);
+    return static_cast<int>(std::lround(ratio * static_cast<float>(kFeetechSCSPositionMax)));
+}
+
+float FeetechServoDevice::countToPosition(const Motor_CAN_Info_Struct& info, int count) const {
+    const float pos_min = (info.p_max > info.p_min) ? info.p_min : 0.0f;
+    const float pos_max = (info.p_max > info.p_min) ? info.p_max : kFeetechSCS0037RangeRad;
+    count = std::max(0, std::min(kFeetechSCSPositionMax, count));
+    const float ratio = static_cast<float>(count) / static_cast<float>(kFeetechSCSPositionMax);
+    return pos_min + ratio * (pos_max - pos_min);
+}
+
+int FeetechServoDevice::speedToCount(float speed_rad_s) const {
+    if (!std::isfinite(speed_rad_s) || speed_rad_s <= 0.0f) {
+        return 0;
+    }
+    const float rpm = speed_rad_s / kFeetechRpmToRadS;
+    const float clipped_rpm = std::max(0.0f, std::min(1023.0f, rpm));
+    return static_cast<int>(std::lround(clipped_rpm));
+}
+
+bool FeetechServoDevice::writePacket(uint8_t id, uint8_t instruction,
+                                     const uint8_t* params, std::size_t length) {
+    if (fd_ < 0 || length > 250) {
+        return false;
+    }
+
+    std::array<uint8_t, 256> packet {};
+    packet[0] = 0xFF;
+    packet[1] = 0xFF;
+    packet[2] = id;
+    packet[3] = static_cast<uint8_t>(length + 2);
+    packet[4] = instruction;
+    if (length > 0 && params) {
+        std::copy(params, params + length, packet.begin() + 5);
+    }
+    packet[5 + length] = feetech_checksum(packet.data() + 2, length + 3);
+
+    tcflush(fd_, TCIFLUSH);
+    const std::size_t packet_len = length + 6;
+    std::size_t sent = 0;
+    while (sent < packet_len) {
+        const ssize_t n = write(fd_, packet.data() + sent, packet_len - sent);
+        if (n > 0) {
+            sent += static_cast<std::size_t>(n);
+            continue;
+        }
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
+            continue;
+        }
+        return false;
+    }
+    tcdrain(fd_);
+    return true;
+}
+
+bool FeetechServoDevice::readStatusPacket(uint8_t expected_id, uint8_t* error,
+                                          uint8_t* data, std::size_t length) {
+    if (fd_ < 0 || length > 250) {
+        return false;
+    }
+
+    std::array<uint8_t, 256> packet {};
+    const std::size_t expected_len = length + 6;
+    std::size_t got = 0;
+
+    while (got < expected_len) {
+        fd_set read_set;
+        FD_ZERO(&read_set);
+        FD_SET(fd_, &read_set);
+
+        timeval timeout {};
+        timeout.tv_sec = 0;
+        timeout.tv_usec = kFeetechReadTimeoutMs * 1000;
+
+        const int ready = select(fd_ + 1, &read_set, nullptr, nullptr, &timeout);
+        if (ready <= 0) {
+            return false;
+        }
+
+        const ssize_t n = read(fd_, packet.data() + got, expected_len - got);
+        if (n > 0) {
+            got += static_cast<std::size_t>(n);
+            continue;
+        }
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
+            continue;
+        }
+        return false;
+    }
+
+    if (packet[0] != 0xFF || packet[1] != 0xFF || packet[2] != expected_id ||
+        packet[3] != static_cast<uint8_t>(length + 2)) {
+        return false;
+    }
+
+    if (feetech_checksum(packet.data() + 2, length + 3) != packet[expected_len - 1]) {
+        return false;
+    }
+
+    if (error) {
+        *error = packet[4];
+    }
+    if (length > 0 && data) {
+        std::copy(packet.begin() + 5, packet.begin() + 5 + static_cast<long>(length), data);
+    }
+    return true;
+}
+
+void FeetechServoDevice::drainInput(int timeout_ms) {
+    if (fd_ < 0) {
+        return;
+    }
+
+    std::array<uint8_t, 64> scratch {};
+    while (true) {
+        fd_set read_set;
+        FD_ZERO(&read_set);
+        FD_SET(fd_, &read_set);
+
+        timeval timeout {};
+        timeout.tv_sec = 0;
+        timeout.tv_usec = timeout_ms * 1000;
+
+        const int ready = select(fd_ + 1, &read_set, nullptr, nullptr, &timeout);
+        if (ready <= 0) {
+            return;
+        }
+
+        const ssize_t n = read(fd_, scratch.data(), scratch.size());
+        if (n <= 0 && !(errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
+            return;
+        }
+    }
+}
+
+bool FeetechServoDevice::writeRegister(int id, uint8_t address,
+                                       const uint8_t* data, std::size_t length) {
+    if (id < 0 || id > 253 || length > 248) {
+        return false;
+    }
+
+    std::array<uint8_t, 249> params {};
+    params[0] = address;
+    if (length > 0 && data) {
+        std::copy(data, data + length, params.begin() + 1);
+    }
+
+    if (!writePacket(static_cast<uint8_t>(id), kFeetechInstWrite, params.data(), length + 1)) {
+        return false;
+    }
+
+    // Some Feetech servos/controllers do not ACK write commands depending on
+    // their status-return-level setting. Reads below still verify live comms.
+    drainInput(2);
+    return true;
+}
+
+bool FeetechServoDevice::readRegister(int id, uint8_t address,
+                                      uint8_t* data, std::size_t length) {
+    if (id < 0 || id > 253 || length == 0 || length > 250 || !data) {
+        return false;
+    }
+
+    const uint8_t params[2] = {address, static_cast<uint8_t>(length)};
+    if (!writePacket(static_cast<uint8_t>(id), kFeetechInstRead, params, sizeof(params))) {
+        return false;
+    }
+
+    uint8_t error = 0;
+    return readStatusPacket(static_cast<uint8_t>(id), &error, data, length) && error == 0;
+}
+
+bool FeetechServoDevice::writeRegisterByte(int id, uint8_t address, uint8_t value) {
+    return writeRegister(id, address, &value, 1);
+}
+
+int FeetechServoDevice::readRegisterByte(int id, uint8_t address) {
+    uint8_t value = 0;
+    if (!readRegister(id, address, &value, 1)) {
+        return -1;
+    }
+    return value;
+}
+
+int FeetechServoDevice::readRegisterWord(int id, uint8_t address,
+                                         bool signed_value, uint8_t sign_bit) {
+    uint8_t data[2] = {0, 0};
+    if (!readRegister(id, address, data, sizeof(data))) {
+        return -1;
+    }
+
+    int value = feetech_read_be_u16(data);
+    if (signed_value && (value & (1 << sign_bit))) {
+        value = -(value & ~(1 << sign_bit));
+    }
+    return value;
+}
+
+bool FeetechServoDevice::writePosition(int id, int position, int speed) {
+    uint8_t data[6] = {0, 0, 0, 0, 0, 0};
+    feetech_write_be_u16(data + 0, position);
+    feetech_write_be_u16(data + 2, 0);
+    feetech_write_be_u16(data + 4, speed);
+    return writeRegister(id, kFeetechGoalPositionAddr, data, sizeof(data));
+}
+
+bool FeetechServoDevice::enableTorque(int id, bool enable) {
+    return writeRegisterByte(id, kFeetechTorqueEnableAddr, enable ? 1 : 0);
+}
+
+bool FeetechServoDevice::SetServoId(int old_id, int new_id) {
+    if (!is_open_ || old_id < 0 || old_id > 253 || new_id < 0 || new_id > 253 ||
+        old_id == 254 || new_id == 254) {
+        return false;
+    }
+
+    if (!writeRegisterByte(old_id, kFeetechEepromLockAddr, 0)) {
+        std::cerr << "[Error] Failed to unlock Feetech EEPROM: id=" << old_id << std::endl;
+        return false;
+    }
+
+    if (!writeRegisterByte(old_id, kFeetechServoIdAddr, static_cast<uint8_t>(new_id))) {
+        std::cerr << "[Error] Failed to write Feetech ID: old_id=" << old_id
+                  << ", new_id=" << new_id << std::endl;
+        return false;
+    }
+
+    if (!writeRegisterByte(new_id, kFeetechEepromLockAddr, 1)) {
+        std::cerr << "[Warn] Feetech ID was written, but EEPROM re-lock did not confirm: new_id="
+                  << new_id << std::endl;
+    }
+    return true;
+}
+
+void FeetechServoDevice::EnableMotor(int& motor_index) {
+    if (!is_open_ || !feetech_valid_motor_index(p_motors_data_, motor_index)) return;
+    const auto& info = (*p_motors_data_)[motor_index].info;
+    if (enableTorque(info.canid, true)) {
+        (*p_motors_data_)[motor_index].recv.motor_state = 1;
+    } else {
+        (*p_motors_data_)[motor_index].recv.fault_message = 1;
+    }
+}
+
+void FeetechServoDevice::DisableMotor(int& motor_index) {
+    if (!is_open_ || !feetech_valid_motor_index(p_motors_data_, motor_index)) return;
+    const auto& info = (*p_motors_data_)[motor_index].info;
+    if (enableTorque(info.canid, false)) {
+        (*p_motors_data_)[motor_index].recv.motor_state = 0;
+    } else {
+        (*p_motors_data_)[motor_index].recv.fault_message = 1;
+    }
+}
+
+void FeetechServoDevice::ClearError(int& motor_index) {
+    if (!feetech_valid_motor_index(p_motors_data_, motor_index)) return;
+    (*p_motors_data_)[motor_index].recv.fault_message = 0;
+}
+
+void FeetechServoDevice::SetZero(int& motor_index) {
+    if (!feetech_valid_motor_index(p_motors_data_, motor_index)) return;
+    std::cout << "[Info] Feetech SetZero is software-neutral; keep TOML pos_min/pos_max as travel limits."
+              << std::endl;
+}
+
+void FeetechServoDevice::SetMode(int& motor_index, int mode) {
+    if (!feetech_valid_motor_index(p_motors_data_, motor_index)) return;
+    (*p_motors_data_)[motor_index].send.mode = static_cast<uint8_t>(std::max(0, mode));
+}
+
+void FeetechServoDevice::SendCommand(int& motor_index) {
+    if (!is_open_ || !feetech_valid_motor_index(p_motors_data_, motor_index)) return;
+    auto& motor = (*p_motors_data_)[motor_index];
+    const int id = motor.info.canid;
+    const int position = positionToCount(motor.info, motor.send.position);
+    const int speed = speedToCount(motor.send.speed);
+
+    if (!writePosition(id, position, speed)) {
+        motor.recv.fault_message = 1;
+        std::cerr << "[Warn] Feetech WritePos failed: id=" << id << std::endl;
+    }
+}
+
+void FeetechServoDevice::QueryPos(int& motor_index) {
+    if (!is_open_ || !feetech_valid_motor_index(p_motors_data_, motor_index)) return;
+    auto& motor = (*p_motors_data_)[motor_index];
+    const int id = motor.info.canid;
+
+    const int pos = readRegisterWord(id, kFeetechPresentPositionAddr, false, 0);
+    if (pos >= 0) {
+        motor.recv.current_position_f.store(countToPosition(motor.info, pos));
+        motor.recv.motor_id = static_cast<uint8_t>(id);
+    }
+
+    const int speed = readRegisterWord(id, kFeetechPresentSpeedAddr, true, 15);
+    if (speed != -1) {
+        motor.recv.current_speed_f.store(static_cast<float>(speed) * kFeetechRpmToRadS);
+    }
+
+    const int load = readRegisterWord(id, kFeetechPresentLoadAddr, true, 10);
+    if (load != -1) {
+        motor.recv.current_torque_f.store(static_cast<float>(load) / 1000.0f);
+    }
+
+    const int temp = readRegisterByte(id, kFeetechPresentTemperatureAddr);
+    if (temp != -1) {
+        motor.recv.current_temp_f.store(static_cast<float>(temp));
+    }
+}
+
+void FeetechServoDevice::QueryVersion(int& motor_index) {
+    (void)motor_index;
+}
 
 // =========================================================
 //  Constants
@@ -849,6 +1602,13 @@ void DeviceX::sendExtendedFrame(uint32_t type, uint16_t data_area, uint8_t motor
     sendFrameWithRetry(&frame, sizeof(frame), "sendExtendedFrame");
 }
 
+void DeviceX::writeType1Param(uint8_t motor_id, uint16_t index, float value) {
+    uint8_t data[8] = {0};
+    std::memcpy(&data[0], &index, sizeof(index));
+    std::memcpy(&data[4], &value, sizeof(value));
+    sendExtendedFrame(18, 0xFD, motor_id, data);
+}
+
 void DeviceX::sendExtendedIdFrame(uint32_t can_id, const uint8_t* data, uint8_t dlc) {
     if (socket_fd < 0 || dlc > 8) return;
 
@@ -1052,11 +1812,15 @@ void DeviceX::SetZero_Type1(int& motor_index) {
 }
 
 void DeviceX::SetMode_Type1(int& motor_index, int mode) {
-    const auto& info = (*p_motors_data)[motor_index].info;
+    auto& motor = (*p_motors_data)[motor_index];
+    const auto& info = motor.info;
+    if (mode < 0) mode = 0;
+    if (mode > 3) mode = 3;
+    motor.send.mode = static_cast<uint8_t>(mode);
 
     uint8_t data[8] = {0};
     uint16_t index = 0x7005;
-    uint8_t mode_val = static_cast<uint8_t>(mode);
+    uint8_t mode_val = motor.send.mode;
 
     std::memcpy(&data[0], &index, 2);
     std::memcpy(&data[4], &mode_val, 1);
@@ -1070,6 +1834,24 @@ void DeviceX::SendCommand_Type1(int& motor_index) {
     const auto& info = motor.info;
 
     uint8_t data[8] = {0};
+
+    if (cmd.mode == 2) {
+        float speed = cmd.speed;
+        if (!std::isfinite(speed)) speed = 0.0f;
+        if (info.v_max > info.v_min) {
+            speed = std::max(info.v_min, std::min(info.v_max, speed));
+        }
+
+        float limit_cur = std::fabs(cmd.torque);
+        if (!std::isfinite(limit_cur) || limit_cur <= 1e-6f) {
+            limit_cur = (info.t_max > 0.0f) ? info.t_max : 43.0f;
+        }
+        limit_cur = std::max(0.0f, std::min(43.0f, limit_cur));
+
+        writeType1Param(static_cast<uint8_t>(info.canid), 0x7018, limit_cur);
+        writeType1Param(static_cast<uint8_t>(info.canid), 0x700A, speed);
+        return;
+    }
 
     uint16_t t_int = float_to_uint(cmd.torque, info.t_min, info.t_max, 16);
     int p_int = float_to_uint(cmd.position, info.p_min, info.p_max, 16);
@@ -1678,7 +2460,11 @@ void DeviceX::ClearError_Type8(int& motor_index) {
 }
 
 void DeviceX::SetZero_Type8(int& motor_index) {
-    (void)motor_index;
+    const auto& info = (*p_motors_data)[motor_index].info;
+    const encos::CommandFrame frame =
+        encos::make_set_zero_command(static_cast<uint32_t>(info.canid));
+    sendStandardFrame(frame.can_id, frame.data.data(), frame.dlc);
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
 }
 
 void DeviceX::SetMode_Type8(int& motor_index, int mode) {
@@ -1782,6 +2568,10 @@ void DeviceX::ReceiveLoop() {
                 parsed_motor_id = canID - 0x140;
             } else if (canID >= 0x180 && canID < 0x1A0) {
                 parsed_motor_id = canID - 0x180;
+            } else if (canID == 0x7FF && frame_len >= 4 && frame.data[2] == 0x01) {
+                // ENCOS setting replies use broadcast ID 0x7FF and carry the motor ID in bytes 0-1.
+                parsed_motor_id = (static_cast<int>(frame.data[0]) << 8) |
+                                  static_cast<int>(frame.data[1]);
             } else if ((canID & 0x400U) != 0 && (canID & 0xFFU) > 0) {
                 // Haitai MIT frames set standard ID bit 10: 0x400 | device address.
                 parsed_motor_id = static_cast<int>(canID & 0xFFU);
@@ -1819,7 +2609,18 @@ void DeviceX::ReceiveLoop() {
 
         Motor_CAN_Struct& motor = (*p_motors_data)[g_idx];
 
-        if (motor.info.api_type == 1 && is_eff) {
+        if (motor.info.api_type == 8 && !is_eff && canID == 0x7FF &&
+            frame_len >= 4 && frame.data[2] == 0x01) {
+            motor.recv.motor_id = static_cast<uint8_t>(parsed_motor_id);
+            if (frame.data[3] == 0x03) {
+                motor.recv.current_position_f.store(0.0f);
+                motor.recv.fault_message = 0;
+                motor.recv.motor_state = 1;
+            } else {
+                motor.recv.fault_message = 1;
+                motor.recv.motor_state = 0;
+            }
+        } else if (motor.info.api_type == 1 && is_eff) {
             uint8_t type_field = (canID >> 24) & 0x1F;
 
             if (type_field == 2 && frame_len >= 8) {

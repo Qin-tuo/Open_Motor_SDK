@@ -9,9 +9,7 @@
 当前仓库中可用的入口程序有：
 - `show_status`：从 `config/motor.toml` 读取配置，初始化并周期性查询所有电机状态
 - `test_mit_mode`：根据 `api_type` 自动切换到 MIT 模式（Type1/2/3/5/8），对单个电机执行正弦摆动测试
-- `test_haitai_mode`：自动选择第一个海泰电机，使用绝对位置模式执行正弦摆动测试
-- `test_feetech_servo`：自动选择第一个 Type4 飞特舵机，执行小幅摆动测试
-- `set_feetech_id`：修改单个飞特 TTL 串口舵机 ID
+- `test_rs01_speed_swing`：RS01 轮电机走速度模式，其余关节先回零再小幅往复摆动
 
 ## 当前目录结构
 ```text
@@ -23,23 +21,18 @@ khcan/
 ├── include/
 ├── main/
 │   ├── show_status.cpp
-│   ├── test_haitai_mode.cpp
 │   ├── test_mit_mode.cpp
-│   ├── test_feetech_servo.cpp
-│   └── set_feetech_id.cpp
+│   └── test_rs01_speed_swing.cpp
 └── src/
 ```
 
 ## 代码框架对应关系
 - `main/show_status.cpp`：程序入口，执行初始化、清错、使能和状态打印循环
 - `main/test_mit_mode.cpp`：通用 MIT 测试入口，自动适配 Type1/2/3/5/8 的 MIT 模式编号
-- `main/test_haitai_mode.cpp`：海泰 Type7 绝对位置测试入口
-- `main/test_feetech_servo.cpp`：飞特 Type4 串口舵机小幅摆动测试入口
-- `main/set_feetech_id.cpp`：飞特舵机 ID 设置工具，改 ID 时必须只连接一个舵机
+- `main/test_rs01_speed_swing.cpp`：RS01 速度模式 + 8 个关节小幅摆动测试入口
 - `config/motor.toml`：电机编号、类型、CAN 通道、CAN ID 与控制参数配置
 - `src/config_loader.cpp`：加载 TOML 配置
-- `src/device.cpp`：SocketCAN 设备收发、接口打开与状态检查
-- `src/feetech_servo_device.cpp`：飞特 TTL 串口舵机协议接入
+- `src/device.cpp`：SocketCAN 设备收发、海泰协议辅助和飞特 TTL 串口舵机协议接入
 - `src/robot.cpp`：机器人整体控制逻辑
 - `include/`：头文件与类型定义
 
@@ -228,6 +221,7 @@ config/motor.toml
 - `p/v/t/kp/kd` 的 `min/max` 既用于发送映射，也用于接收反解（不同 `api_type` 有差异，但都依赖这些边界）。
 - `kp_in_use`、`kd_in_use` 会在初始化时拷贝到每个电机的发送缓存，后续可再通过接口动态修改。
 - `pos_min`、`pos_max` 用于 `Move/Move_N` 的发送前限幅；若 `pos_min >= pos_max`，限幅逻辑会被跳过（等价于不启用软限位）。
+- `api_type=1`（灵足/富兴）`SetMode_N(..., 2)` 会切到速度模式；随后 `Move_N()` 使用 `cmd.v` 写入 `0x700A spd_ref`，使用 `abs(cmd.t)` 写入 `0x7018 limit_cur`（未填写或为 0 时使用配置中的正向 `t_max`，并限制到协议 `0~43A`）。其他模式仍使用通信类型 1 的运控/MIT 帧。
 
 Type5 当前内置的常见型号系数：`M3536_32`、`M4438_30`、`M4438_32`、`M4538_19`、`M5043_20`、`M5046_20`、`M5047_09`、`M5047_36`、`M6056_36`、`M7256_35`、`M60SG_35`、`M60BM_35`。
 
@@ -261,22 +255,7 @@ source install/setup.bash
 - `share/khcan/config/motor.toml`：默认配置文件
 - `ros2 run khcan show_status`
 - `ros2 run khcan test_mit_mode`
-- `ros2 run khcan test_haitai_mode`
-- `ros2 run khcan test_feetech_servo`
-- `ros2 run khcan set_feetech_id --port /dev/ttyACM0 --old-id 1 --new-id 2`
-
-### 修改飞特舵机 ID
-先只连接一个要修改的飞特舵机，然后执行：
-```bash
-ros2 run khcan set_feetech_id --port /dev/ttyACM0 --old-id 1 --new-id 2
-```
-
-默认波特率为 `500000`，如需指定：
-```bash
-ros2 run khcan set_feetech_id --port /dev/ttyACM0 --baud 500000 --old-id 1 --new-id 2
-```
-
-修改完成后断电重启舵机，并在 `motor.toml` 中把该舵机的 `canid` 改为新的 ID。
+- `ros2 run khcan test_rs01_speed_swing`
 
 ### 作为驱动库植入其他工程
 在下游 ROS 2 包中可直接 `find_package(khcan)` 并链接导出的 CMake target：
@@ -323,10 +302,7 @@ source install/setup.bash
 ```bash
 ros2 run khcan show_status
 ros2 run khcan test_mit_mode
-ros2 run khcan test_haitai_mode
-ros2 run khcan test_feetech_servo
-
-
+ros2 run khcan test_rs01_speed_swing --wheel-speed 2.0 --wheel-current 3.0 --amp 0.20 --freq 0.25
 ```
 
 PFL28 独立排障入口已删除。Type6/PFL28 驱动仍保留在库中，业务代码请通过 `BaseRobot` 直接发送位置/电流命令。
@@ -348,6 +324,12 @@ sudo ip link set can3 up
 
 sudo ip link set can4 type can bitrate 1000000
 sudo ip link set can4 up
+
+sudo ip link set can5 type can bitrate 1000000
+sudo ip link set can5 up
+
+sudo ip link set can6 type can bitrate 1000000
+sudo ip link set can6 up
 ```
 
 **Type5（高擎）在 MIT 模式下会发送 CAN FD 帧。若你使用 `main/test_mit_mode.cpp`（可执行名 `test_mit_mode`），建议接口按 FD 模式配置：**

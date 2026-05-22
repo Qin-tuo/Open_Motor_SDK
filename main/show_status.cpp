@@ -15,7 +15,7 @@ int main() {
     robot.DisableAll(); // 启动时先关闭所有电机，确保安全
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
-    //robot.SetZero_All();
+    // robot.SetZero_All();
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
     // 2. 清除错误 (建议启动时执行一次)

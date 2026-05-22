@@ -2,7 +2,6 @@
 
 #include "config_loader.hpp"
 #include "device.hpp"
-#include "feetech_servo_device.hpp"
 #include "mapper.hpp"
 #include "types.hpp"
 
