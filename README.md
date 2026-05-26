@@ -214,7 +214,7 @@ config/motor.toml
 - `api_type=8`（ENCOS / 因克斯 EC-A）使用经典标准 CAN 帧；`SetMode_N()` 支持 `0` MIT 混控、`1` 位置、`2` 速度、`3` 力矩/电流，`send.position/speed/torque/kp/kd` 按 EC-A 型号映射范围打包。
 - `api_type=4`（飞特 SCS0037-C001）默认将 `send.position` 按 `0~4.712389rad` 映射到舵机 `0~1023` 位置值；`send.speed` 按 rad/s 转成飞特速度值，填 `0` 表示不限制/由舵机默认处理；`send.torque` 暂不参与飞特位置指令。
 - 修改飞特舵机 ID 前，必须确保总线上只接一个舵机，避免多个出厂默认 `ID=1` 的舵机被同时改成同一个 ID。
-- Type1/3/7/8 的内置型号参数来自 `https://can.robotsfan.com/`：灵足/富兴支持 `RS00`~`RS06`、`CyberGear`；ENCOS/因克斯支持 `EC-A8112-P1-18`、`EC-A4310-P2-36`、`EC-A6408-P2-25`、`EC-A10020-P1-12`、`EC-A10020-P2-24`、`EC-A13715-P1-12.67`、`EC-A13720-P1-11.4`；达妙/达秒支持 `DM4310`、`DM4310_48V`、`DM4340`、`DM4340_48V`、`DM6006`、`DM8006`、`DM8009`、`DM10010L`、`DM10010`、`DMH3510`、`DMH6215`、`DMG6220`。
+- Type1/3/7/8 的内置型号参数来自 `https://can.robotsfan.com/` 和厂商资料：灵足/富兴支持 `RS00`~`RS06`、`CyberGear`；ENCOS/因克斯支持 `EC-A2806-P2-36`、`EC-A8112-P1-18`、`EC-A4310-P2-36`、`EC-A4315-P2-36`、`EC-A6408-P2-25`、`EC-A10020-P1-12`、`EC-A10020-P2-24`、`EC-A13715-P1-12.67`、`EC-A13720-P1-11.4`；达妙/达秒支持 `DM4310`、`DM4310_48V`、`DM4340`、`DM4340_48V`、`DM6006`、`DM8006`、`DM8009`、`DM10010L`、`DM10010`、`DMH3510`、`DMH6215`、`DMG6220`。
 - 对 Type1/2/3/4/7/8，`kp_in_use` 和 `kd_in_use` 仍建议显式保留在 TOML 中，便于现场调参；Type4 当前不使用 kp/kd 做闭环控制，但保留字段以兼容统一配置。`p/v/t/kp/kd` 的 `min/max` 可由型号表自动填写，也可以在 TOML 中显式覆盖。
 - `api_type=7`（海泰 Rev.3.07b0）默认将 `send.mode=0` 映射为 `0xC2` 绝对位置控制；`SetMode_N()` 支持 `0` 绝对位置、`1` 电流、`2` 速度、`3` 相对位置、`4` MIT 模式。海泰 `QueryPos` 使用 `0xA4` 复合状态查询，能同时回读位置、速度、电流和温度；驱动层不会在 `Enable_N()` 或 `SetMode_N()` 中自动查询/写入 `0xF0`，只有显式调用 `ConfigureHaitaiMitLimits_N()` 或上层策略时才会发送 `0xF0`。
 - Type7 海泰可在 `type` 中填写具体型号并自动使用 MIT 默认限幅：`HT2205` 为 `95.5rad / 125.66rad/s / 0.06Nm`，`HT3505-J8` 为 `95.5rad / 32.04rad/s / 0.85Nm`，`HT4305` / `HT4305-J10` 为 `95.5rad / 41.89rad/s / 3.0Nm`，`HT4310-J10` 为 `95.5rad / 31.42rad/s / 1.0Nm`，`HT6010-J6` 为 `95.5rad / 70.16rad/s / 9.0Nm`。未知型号回退到协议默认 `95.5rad / 45rad/s / 18Nm`；TOML 中显式填写的 `p/v/t/kp/kd` 字段始终优先覆盖内置默认值。
@@ -231,6 +231,8 @@ Type5 当前内置的常见型号系数：`M3536_32`、`M4438_30`、`M4438_32`�
 领控（Type2）：{num = 2, name = "R_LK_1", type = "LK", api_type = 2, chan = 1, canid = 1, p_min = -12.5, p_max = 12.5, v_min = -18.0, v_max = 18.0, kp_min = 0.0, kp_max = 500.0, kd_min = 0.0, kd_max = 5.0, t_min = -30.0, t_max = 30.0, kp_in_use = 20, kd_in_use = 0.8, pos_min = 0.0, pos_max = 0.0}
 
 ENCOS / 因克斯（按型号自动加载 MIT 映射范围）：{num = 8, name = "R_EC_1", type = "EC-A4310-P2-36", api_type = 8, chan = 1, canid = 1, kp_in_use = 20, kd_in_use = 0.8, pos_min = 0.0, pos_max = 0.0}
+
+ENCOS 2806 / 因克斯（峰值扭矩 12Nm）：{num = 8, name = "R_EC_2806", type = "EC-A2806-P2-36", api_type = 8, chan = 1, canid = 1, kp_in_use = 20, kd_in_use = 0.8, pos_min = 0.0, pos_max = 0.0}
 
 达妙/达秒（按型号自动加载 MIT 映射范围）：{num = 3, name = "R_DM_1", type = "DM8009", api_type = 3, chan = 1, canid = 1, kp_in_use = 1, kd_in_use = 1, pos_min = 0.0, pos_max = 0.0}
 

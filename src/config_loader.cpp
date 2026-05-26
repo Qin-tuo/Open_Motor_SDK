@@ -53,6 +53,7 @@ bool get_robstride_model_defaults(const std::string& key, MotorModelDefaults& ou
 }
 
 bool get_encos_model_defaults(const std::string& key, MotorModelDefaults& out) {
+    if (key_is(key, {"EC-A2806-P2-36", "EC-A2806", "ENCOS 2806", "ENCOS2806", "2806"})) { out = make_symmetric_defaults(12.5f, 18.0f, 500.0f, 5.0f, 12.0f); return true; }
     if (key == "EC-A8112-P1-18") { out = make_symmetric_defaults(12.5f, 18.0f, 500.0f, 5.0f, 90.0f); return true; }
     if (key == "EC-A4310-P2-36") { out = make_symmetric_defaults(12.5f, 18.0f, 500.0f, 5.0f, 30.0f); return true; }
     if (key == "EC-A4315-P2-36") { out = make_symmetric_defaults(12.5f, 18.0f, 500.0f, 5.0f, 70.0f); return true; }

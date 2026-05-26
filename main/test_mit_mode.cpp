@@ -80,7 +80,7 @@ static void prepare_motor_for_mit(BaseRobot& robot, int target_idx) {
     float kp = info.kp_in_use;
     float kd = info.kd_in_use;
     if (kp == 0.0f && kd == 0.0f) {
-        kp = 20.0f;
+        kp = 10.0f;
         kd = 0.8f;
     }
     robot.SetKpd_N(kp, kd, target_idx);
@@ -122,7 +122,7 @@ int main() {
 
     const float center = 0.0f;
     float amp = 0.60f;      // rad
-    const float freq = 0.40f; // Hz
+    const float freq = 2.0f; // Hz
 
     if (info.pos_max > info.pos_min) {
         const float safe_amp = 0.7f * std::min(std::fabs(center - info.pos_min), std::fabs(info.pos_max - center));
