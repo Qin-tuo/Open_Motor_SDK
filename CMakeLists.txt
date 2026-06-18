@@ -95,9 +95,8 @@ install(TARGETS motor_driver_node
 )
 
 install(PROGRAMS
-  scripts/rear_pitch_swing.py
+  scripts/neck_zero_eye_swing.py
   DESTINATION lib/${PROJECT_NAME}
-  RENAME rear_pitch_swing
 )
 
 install(DIRECTORY include/

@@ -610,6 +610,14 @@ float jc_deg_x100_to_rad(int32_t raw) {
     return static_cast<float>(raw) * 0.01f * kDegToRad;
 }
 
+float jc_rpm_x100_to_rad_s(int32_t raw) {
+    return static_cast<float>(raw) * 0.01f * 6.28318530718f / 60.0f;
+}
+
+float jc_rpm_to_rad_s(int32_t raw) {
+    return static_cast<float>(raw) * 6.28318530718f / 60.0f;
+}
+
 void jc_write_be_i32(uint8_t* dst, int32_t value) {
     const uint32_t raw = static_cast<uint32_t>(value);
     dst[0] = static_cast<uint8_t>((raw >> 24) & 0xFF);
@@ -624,6 +632,22 @@ int32_t jc_read_be_i32(const uint8_t* src) {
                          (static_cast<uint32_t>(src[2]) << 8) |
                          static_cast<uint32_t>(src[3]);
     return static_cast<int32_t>(raw);
+}
+
+int32_t jc_read_be_i24(const uint8_t* src) {
+    uint32_t raw = (static_cast<uint32_t>(src[0]) << 16) |
+                   (static_cast<uint32_t>(src[1]) << 8) |
+                   static_cast<uint32_t>(src[2]);
+    if ((raw & 0x800000U) != 0) {
+        raw |= 0xFF000000U;
+    }
+    return static_cast<int32_t>(raw);
+}
+
+int16_t jc_read_be_i16(const uint8_t* src) {
+    const uint16_t raw = (static_cast<uint16_t>(src[0]) << 8) |
+                         static_cast<uint16_t>(src[1]);
+    return static_cast<int16_t>(raw);
 }
 
 void make_jc_write16(uint8_t* data, uint16_t reg, uint16_t value) {
@@ -2699,8 +2723,9 @@ bool DeviceX::EnableMotor_Type9(int& motor_index) {
     const auto& info = motor.info;
     uint8_t data[8] = {0};
 
-    const uint8_t mode = (motor.send.mode <= 5) ? motor.send.mode : 4;
-    make_jc_write16(data, 0x0060, mode == 0 ? 4 : mode);
+    const uint8_t mode = (motor.send.mode <= 5 && motor.send.mode != 0) ? motor.send.mode : 4;
+    motor.send.mode = mode;
+    make_jc_write16(data, 0x0060, mode);
     const bool mode_sent = sendStandardFrame(0x600U + static_cast<uint32_t>(info.canid), data, sizeof(data));
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
 
@@ -2746,6 +2771,7 @@ void DeviceX::SetZero_Type9(int& motor_index) {
 bool DeviceX::SetMode_Type9(int& motor_index, int mode) {
     if (mode < 0) mode = 4;
     if (mode > 5) mode = 5;
+    if (mode == 0) mode = 4;
     auto& motor = (*p_motors_data)[motor_index];
     motor.send.mode = static_cast<uint8_t>(mode);
 
@@ -2756,12 +2782,21 @@ bool DeviceX::SetMode_Type9(int& motor_index, int mode) {
 }
 
 bool DeviceX::SendCommand_Type9(int& motor_index) {
-    const auto& motor = (*p_motors_data)[motor_index];
+    auto& motor = (*p_motors_data)[motor_index];
     const auto& info = motor.info;
-    const auto& cmd = motor.send;
+    auto& cmd = motor.send;
     uint8_t data[8] = {0};
 
-    if (cmd.mode == 0 || cmd.mode == 2 || cmd.mode == 3 || cmd.mode == 4) {
+    bool mode_sent = true;
+    if (cmd.mode == 0) {
+        cmd.mode = 4;
+        make_jc_write16(data, 0x0060, 4);
+        mode_sent = sendStandardFrame(0x600U + static_cast<uint32_t>(info.canid), data, sizeof(data));
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        std::fill(data, data + sizeof(data), 0);
+    }
+
+    if (cmd.mode == 2 || cmd.mode == 3 || cmd.mode == 4) {
         const int32_t pos_raw = static_cast<int32_t>(std::lround(jc_rad_to_deg_x100(cmd.position)));
         make_jc_write32(data, 0x0023, pos_raw);
     } else if (cmd.mode == 1) {
@@ -2773,7 +2808,7 @@ bool DeviceX::SendCommand_Type9(int& motor_index) {
         make_jc_write16(data, 0x0020, static_cast<uint16_t>(torque_raw));
     }
 
-    return sendStandardFrame(0x600U + static_cast<uint32_t>(info.canid), data, sizeof(data));
+    return mode_sent && sendStandardFrame(0x600U + static_cast<uint32_t>(info.canid), data, sizeof(data));
 }
 
 bool DeviceX::QueryPos_Type9(int& motor_index) {
@@ -2849,13 +2884,14 @@ void DeviceX::ReceiveLoop() {
                 // ENCOS setting replies use broadcast ID 0x7FF and carry the motor ID in bytes 0-1.
                 parsed_motor_id = (static_cast<int>(frame.data[0]) << 8) |
                                   static_cast<int>(frame.data[1]);
-            } else if (canID >= 0x201 && canID <= 0x208) {
-                parsed_motor_id = canID - 0x200;
             } else if (canID >= 0x581 && canID <= 0x5FF) {
+                // JC servo replies use 0x580 + node ID.
                 parsed_motor_id = canID - 0x580;
-            } else if (canID >= 0x401 && canID <= 0x4FF) {
+            } else if ((canID & 0x400U) != 0 && (canID & 0xFFU) > 0) {
                 // Haitai MIT frames set standard ID bit 10: 0x400 | device address.
                 parsed_motor_id = static_cast<int>(canID & 0xFFU);
+            } else if (canID >= 0x201 && canID <= 0x208) {
+                parsed_motor_id = canID - 0x200;
             } else if (canID > 0 && canID <= 0xFF) {
                 // PFL28/L28, Haitai, and ENCOS standard frames: CAN ID is node id/device address.
                 parsed_motor_id = static_cast<int>(canID);
@@ -3103,27 +3139,36 @@ void DeviceX::ReceiveLoop() {
                 motor.recv.motor_state = feedback.state;
             }
         } else if (motor.info.api_type == 9 && !(frame.can_id & CAN_EFF_FLAG) && frame_len >= 8) {
+            const uint8_t cmd = frame.data[0];
             const uint16_t reg = static_cast<uint16_t>(
                 (static_cast<uint16_t>(frame.data[1]) << 8) | frame.data[2]);
 
             motor.recv.motor_id = static_cast<uint8_t>(parsed_motor_id);
             motor.recv.motor_state = 1;
-            if (reg == 0x0008 || reg == 0x0023) {
+            if (cmd == 0x2A) {
+                const int32_t pos_raw = jc_read_be_i24(&frame.data[1]);
+                const int16_t speed_raw = jc_read_be_i16(&frame.data[4]);
+                const int16_t current_raw = jc_read_be_i16(&frame.data[6]);
+                motor.recv.current_position_f.store(jc_deg_x100_to_rad(pos_raw));
+                motor.recv.current_speed_f.store(jc_rpm_to_rad_s(speed_raw));
+                motor.recv.current_torque_f.store(static_cast<float>(current_raw) * 0.01f);
+                motor.recv.mode = motor.send.mode;
+                motor.recv.fault_message = 0;
+            } else if ((cmd == 0x43 || cmd == 0x23) && (reg == 0x0008 || reg == 0x0023)) {
                 const int32_t pos_raw = jc_read_be_i32(&frame.data[4]);
                 motor.recv.current_position_f.store(jc_deg_x100_to_rad(pos_raw));
                 motor.recv.mode = motor.send.mode;
                 motor.recv.fault_message = 0;
-            } else if (reg == 0x0021) {
+            } else if ((cmd == 0x43 || cmd == 0x23) && reg == 0x0021) {
                 const int32_t speed_raw = jc_read_be_i32(&frame.data[4]);
-                const float rpm = static_cast<float>(speed_raw) * 0.01f;
-                motor.recv.current_speed_f.store(rpm * TWO_PI / 60.0f);
-            } else if (reg == 0x0020) {
+                motor.recv.current_speed_f.store(jc_rpm_x100_to_rad_s(speed_raw));
+            } else if ((cmd == 0x4B || cmd == 0x2B) && reg == 0x0020) {
                 const int16_t tq_raw = static_cast<int16_t>(
                     (static_cast<uint16_t>(frame.data[4]) << 8) | frame.data[5]);
                 motor.recv.current_torque_f.store(static_cast<float>(tq_raw) * 0.01f);
-            } else if (reg == 0x000C) {
+            } else if ((cmd == 0x43 || cmd == 0x4B) && reg == 0x000C) {
                 motor.recv.fault_message = frame.data[7];
-            } else if (reg == 0x0060) {
+            } else if ((cmd == 0x4B || cmd == 0x2B) && reg == 0x0060) {
                 motor.recv.mode = frame.data[5];
             }
             motor.recv.feedback_sequence.fetch_add(1, std::memory_order_relaxed);

@@ -431,6 +431,7 @@ void BaseRobot::PrintStatus() {
                   << " [" << m.info.name << "]"
                   << " | Cmd: " << std::fixed << std::setprecision(2) << m.send.position
                   << " | Fault: " << static_cast<int>(m.recv.fault_message.load())
+                  << " | Mode: " << static_cast<int>(m.recv.mode)
                   << " | ReadPos: " << m.recv.current_position_f.load()
                   << " | ReadVel: " << m.recv.current_speed_f.load()
                   << std::endl;
