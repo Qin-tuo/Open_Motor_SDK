@@ -784,7 +784,8 @@ bool parse_haitai_feedback(uint32_t can_id, const std::array<uint8_t, 8>& data,
         case 0xC4:
             if (dlc != 7) return false;
             out.has_position = true;
-            out.position_rad = haitai_count_to_rad(haitai_read_le_i32(&data[3]));
+            out.position_rad = haitai_wrap_to_signed_pi(
+                haitai_count_to_rad(haitai_read_le_u16(&data[1])));
             return true;
         case 0xA4:
             if (dlc != 8) return false;
@@ -2570,9 +2571,38 @@ bool DeviceX::SendCommand_Type7(int& motor_index) {
 }
 
 bool DeviceX::QueryPos_Type7(int& motor_index) {
-    const auto& info = (*p_motors_data)[motor_index].info;
-    const HaitaiCommandFrame frame = make_haitai_simple_query(0xA4, static_cast<uint32_t>(info.canid));
-    return sendStandardFrame(frame.can_id, frame.data.data(), frame.dlc);
+    auto& motor = (*p_motors_data)[motor_index];
+    const auto& info = motor.info;
+    const uint32_t can_id = static_cast<uint32_t>(info.canid);
+
+    auto send_query = [&](uint8_t cmd) {
+        const HaitaiCommandFrame frame = make_haitai_simple_query(cmd, can_id);
+        return sendStandardFrame(frame.can_id, frame.data.data(), frame.dlc);
+    };
+
+    if (!motor.recv.version_valid) {
+        bool ok = send_query(0xA0);
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+        ok = send_query(0xA4) && ok;
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+        ok = send_query(0xA3) && ok;
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+        ok = send_query(0xA2) && ok;
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+        ok = send_query(0xA1) && ok;
+        return ok;
+    }
+
+    if (motor.recv.can_proto_version < 7) {
+        bool ok = send_query(0xA3);
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+        ok = send_query(0xA2) && ok;
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+        ok = send_query(0xA1) && ok;
+        return ok;
+    }
+
+    return send_query(0xA4);
 }
 
 void DeviceX::QueryVersion_Type7(int& motor_index) {
@@ -2819,13 +2849,13 @@ void DeviceX::ReceiveLoop() {
                 // ENCOS setting replies use broadcast ID 0x7FF and carry the motor ID in bytes 0-1.
                 parsed_motor_id = (static_cast<int>(frame.data[0]) << 8) |
                                   static_cast<int>(frame.data[1]);
-            } else if ((canID & 0x400U) != 0 && (canID & 0xFFU) > 0) {
-                // Haitai MIT frames set standard ID bit 10: 0x400 | device address.
-                parsed_motor_id = static_cast<int>(canID & 0xFFU);
             } else if (canID >= 0x201 && canID <= 0x208) {
                 parsed_motor_id = canID - 0x200;
             } else if (canID >= 0x581 && canID <= 0x5FF) {
                 parsed_motor_id = canID - 0x580;
+            } else if (canID >= 0x401 && canID <= 0x4FF) {
+                // Haitai MIT frames set standard ID bit 10: 0x400 | device address.
+                parsed_motor_id = static_cast<int>(canID & 0xFFU);
             } else if (canID > 0 && canID <= 0xFF) {
                 // PFL28/L28, Haitai, and ENCOS standard frames: CAN ID is node id/device address.
                 parsed_motor_id = static_cast<int>(canID);
