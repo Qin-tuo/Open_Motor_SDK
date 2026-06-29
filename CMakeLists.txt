@@ -16,11 +16,15 @@ find_package(ament_index_cpp REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(Threads REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
+  "msg/MotorStatus.msg"
+  "msg/MotorStatusArray.msg"
   "srv/SetMotorMode.srv"
+  DEPENDENCIES std_msgs
 )
 
 set(KHCAN_DRIVER_SRCS
@@ -71,6 +75,7 @@ ament_target_dependencies(motor_driver_node
   ament_index_cpp
   rclcpp
   sensor_msgs
+  std_msgs
   std_srvs
 )
 rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")

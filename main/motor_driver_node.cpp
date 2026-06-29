@@ -14,6 +14,7 @@
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <std_srvs/srv/trigger.hpp>
 
+#include "khcan/msg/motor_status_array.hpp"
 #include "khcan/srv/set_motor_mode.hpp"
 
 class MotorDriverNode : public rclcpp::Node {
@@ -60,6 +61,7 @@ private:
         std::unordered_map<std::string, int> name_to_index;
         rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr command_sub;
         rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr state_pub;
+        rclcpp::Publisher<khcan::msg::MotorStatusArray>::SharedPtr status_pub;
         rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr enable_srv;
         rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr disable_srv;
         rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr clear_srv;
@@ -93,6 +95,8 @@ private:
                 });
             channel.state_pub = create_publisher<sensor_msgs::msg::JointState>(
                 prefix + "/joint_states", 10);
+            channel.status_pub = create_publisher<khcan::msg::MotorStatusArray>(
+                prefix + "/status_feedback", 10);
             channel.enable_srv = create_service<std_srvs::srv::Trigger>(
                 prefix + "/enable",
                 [this, chan = channel.chan](const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
@@ -216,21 +220,43 @@ private:
     }
 
     void publish_channel_state(ChannelContext& channel) {
+        const auto stamp = now();
+
         sensor_msgs::msg::JointState msg;
-        msg.header.stamp = now();
+        msg.header.stamp = stamp;
         msg.name.reserve(channel.motor_indices.size());
         msg.position.reserve(channel.motor_indices.size());
         msg.velocity.reserve(channel.motor_indices.size());
         msg.effort.reserve(channel.motor_indices.size());
 
+        khcan::msg::MotorStatusArray status;
+        status.header.stamp = stamp;
+        status.motors.reserve(channel.motor_indices.size());
+
         for (int idx : channel.motor_indices) {
             const auto& motor = robot_->global_motors[static_cast<std::size_t>(idx)];
+            const auto& recv = motor.recv;
+
             msg.name.push_back(motor.info.name);
-            msg.position.push_back(motor.recv.current_position_f.load());
-            msg.velocity.push_back(motor.recv.current_speed_f.load());
-            msg.effort.push_back(motor.recv.current_torque_f.load());
+            msg.position.push_back(recv.current_position_f.load());
+            msg.velocity.push_back(recv.current_speed_f.load());
+            msg.effort.push_back(recv.current_torque_f.load());
+
+            khcan::msg::MotorStatus s;
+            s.name = motor.info.name;
+            s.motor_id = recv.motor_id;
+            s.mode = recv.mode;
+            s.motor_state = recv.motor_state;
+            s.fault_code = recv.fault_message.load();
+            s.position = recv.current_position_f.load();
+            s.speed = recv.current_speed_f.load();
+            s.torque = recv.current_torque_f.load();
+            s.current = recv.current_iq_f.load();
+            s.temperature = recv.current_temp_f.load();
+            status.motors.push_back(std::move(s));
         }
         channel.state_pub->publish(msg);
+        channel.status_pub->publish(status);
     }
 
     void on_set_mode(int chan,
