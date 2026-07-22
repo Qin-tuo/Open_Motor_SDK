@@ -5,69 +5,79 @@
 #include "mapper.hpp"
 #include "types.hpp"
 
+#include <chrono>
 #include <map>
-#include <set>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
 struct MotorCmdVec {
-    float p;  // position
-    float v;  // velocity
-    float t;  // torque/current, depending on api_type
+    float p;
+    float v;
+    float t;
 };
 
 class BaseRobot {
-private:
-    bool disable_on_destroy_ = true;
-
-    inline float Clip(float val, float min, float max) {
-        if (min >= max) return val;
-        return (val < min) ? min : ((val > max) ? max : val);
-    }
-
 public:
     explicit BaseRobot(const std::string& config_file, bool disable_on_destroy = true);
-    BaseRobot(const std::string& config_file,
-              bool disable_on_destroy,
-              const std::vector<std::string>& active_motor_names);
     ~BaseRobot();
 
-    void EnableAll();
-    void DisableAll();
+    BaseRobot(const BaseRobot&) = delete;
+    BaseRobot& operator=(const BaseRobot&) = delete;
 
-    bool Enable_N(int N);
-    bool Disable_N(int N);
-    int SetKpd_N(float kp, float kd, int N);
-    void SetKpd_all(float kp, float kd);
+    std::size_t MotorCount() const;
+    bool GetMotorInfo(int index, Motor_CAN_Info_Struct& info) const;
+    bool GetMotorSnapshot(int index, Motor_CAN_Struct& motor) const;
+    bool GetCommand_N(int index, MotorCmdVec& command) const;
 
-    void ClearError_N(int N);
-    void SetZero_N(int N);
-    void ClearError_All();
-    void SetZero_All();
+    bool EnableAll();
+    bool DisableAll();
+    bool Enable_N(int index);
+    bool Disable_N(int index);
 
-    bool Stage_N(int N, const MotorCmdVec& target);
-    bool Flush_N(int N);
-    bool Move_N(int N, const MotorCmdVec& target);
+    int SetKpd_N(float kp, float kd, int index);
+    bool SetKpd_all(float kp, float kd);
+    bool ClearError_N(int index);
+    bool SetZero_N(int index);
+    bool ClearError_All();
+    bool SetZero_All();
+
+    bool Stage_N(int index, const MotorCmdVec& target);
+    bool Flush_N(int index);
+    bool Move_N(int index, const MotorCmdVec& target);
     bool Move(const std::vector<MotorCmdVec>& targets);
 
-    void SetModes(std::vector<int>& modes);
-    bool SetMode_N(int N, int mode);
-    bool ConfigureHaitaiMitLimits_N(int N);
-    void SetModeAll_TypeX(int X, int mode);
+    bool SetModes(const std::vector<int>& modes);
+    bool SetMode_N(int index, int mode);
+    bool ConfigureHaitaiMitLimits_N(int index);
+    bool SetModeAll_TypeX(int api_type, int mode);
 
-    void QueryPos_ALL();
-    bool QueryPos_N(int N);
-    void QueryVersion_N(int N);
+    bool QueryPos_ALL();
+    bool QueryPos_N(int index);
+    bool QueryVersion_N(int index);
     int FindMotorIndexByName(const std::string& name) const;
-    bool IsMotorReady(int N) const;
+    bool IsMotorReady(int index) const;
 
-    void PrintStatus();
-    std::vector<float> GetPosAll();
-    std::vector<float> GetPosN(int n);
+    void SetCommandTimeout(std::chrono::milliseconds timeout);
+    int CheckCommandTimeouts();
 
-    std::vector<Motor_CAN_Struct> global_motors;
-    std::vector<DeviceX*> devices;
-    std::vector<FeetechServoDevice*> feetech_devices;
-    TopoMapper mapper;
-    std::map<std::string, int> device_name_map_idx;
+    void PrintStatus() const;
+    std::vector<float> GetPosAll() const;
+    std::vector<float> GetPosN(int count) const;
+
+private:
+    DeviceX* deviceForMotor(int index) const;
+
+    bool disable_on_destroy_ = true;
+    std::vector<Motor_CAN_Struct> motors_;
+    MotorMapper mapper_;
+    std::map<std::string, int> device_name_to_index_;
+
+    // ponytail: one shared lock is enough at current scale; split per motor only if contention is measured.
+    mutable std::mutex motor_mutex_;
+    std::vector<uint64_t> last_command_ns_;
+    std::vector<bool> command_armed_;
+    uint64_t command_timeout_ns_ = 100000000ULL;
+    std::vector<std::unique_ptr<DeviceX>> devices_;
 };

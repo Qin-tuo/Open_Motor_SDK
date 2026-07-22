@@ -18,6 +18,8 @@ def generate_launch_description():
             DeclareLaunchArgument("rate_hz", default_value="100.0"),
             DeclareLaunchArgument("auto_enable", default_value="false"),
             DeclareLaunchArgument("default_mode", default_value="-1"),
+            DeclareLaunchArgument("command_timeout_ms", default_value="100"),
+            DeclareLaunchArgument("feedback_timeout_ms", default_value="500"),
             Node(
                 package="khcan",
                 executable="motor_driver_node",
@@ -34,6 +36,12 @@ def generate_launch_description():
                         ),
                         "default_mode": ParameterValue(
                             LaunchConfiguration("default_mode"), value_type=int
+                        ),
+                        "command_timeout_ms": ParameterValue(
+                            LaunchConfiguration("command_timeout_ms"), value_type=int
+                        ),
+                        "feedback_timeout_ms": ParameterValue(
+                            LaunchConfiguration("feedback_timeout_ms"), value_type=int
                         ),
                     }
                 ],

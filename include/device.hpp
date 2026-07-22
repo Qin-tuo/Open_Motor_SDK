@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -77,57 +78,16 @@ bool parse_haitai_feedback(uint32_t can_id, const std::array<uint8_t, 8>& data,
                            float mit_vel_max_rad_s = 45.0f,
                            float mit_torque_max_nm = 18.0f);
 
-class FeetechServoDevice {
-public:
-    ~FeetechServoDevice();
-
-    bool Init(const std::string& port, int baud, int dev_idx,
-              std::vector<Motor_CAN_Struct>* data_ptr, TopoMapper* mapper_ptr);
-
-    void EnableMotor(int& motor_index);
-    void DisableMotor(int& motor_index);
-    void ClearError(int& motor_index);
-    void SetZero(int& motor_index);
-    void SetMode(int& motor_index, int mode);
-    void SendCommand(int& motor_index);
-    void QueryPos(int& motor_index);
-    void QueryVersion(int& motor_index);
-    bool SetServoId(int old_id, int new_id);
-
-private:
-    int positionToCount(const Motor_CAN_Info_Struct& info, float position_rad) const;
-    float countToPosition(const Motor_CAN_Info_Struct& info, int count) const;
-    int speedToCount(float speed_rad_s) const;
-    bool openSerial();
-    void closeSerial();
-    bool writePosition(int id, int position, int speed);
-    bool enableTorque(int id, bool enable);
-    int readRegisterByte(int id, uint8_t address);
-    int readRegisterWord(int id, uint8_t address, bool signed_value, uint8_t sign_bit);
-    bool writeRegisterByte(int id, uint8_t address, uint8_t value);
-    bool writeRegister(int id, uint8_t address, const uint8_t* data, std::size_t length);
-    bool readRegister(int id, uint8_t address, uint8_t* data, std::size_t length);
-    bool writePacket(uint8_t id, uint8_t instruction, const uint8_t* params, std::size_t length);
-    bool readStatusPacket(uint8_t expected_id, uint8_t* error, uint8_t* data, std::size_t length);
-    void drainInput(int timeout_ms);
-
-    int fd_ = -1;
-    std::string port_;
-    int baud_ = 500000;
-    int device_global_index_ = -1;
-    std::vector<Motor_CAN_Struct>* p_motors_data_ = nullptr;
-    TopoMapper* p_mapper_ = nullptr;
-    std::atomic<bool> is_open_{false};
-};
-
 // Unified SocketCAN device class. Protocol behavior is selected by api_type.
 class DeviceX {
 protected:
-    int socket_fd = -1;
+    std::atomic<int> socket_fd{-1};
     std::string iface_name;
     int device_global_index = -1;
     std::vector<Motor_CAN_Struct>* p_motors_data = nullptr;
-    TopoMapper* p_mapper = nullptr;
+    MotorMapper* p_mapper = nullptr;
+    std::mutex* p_motor_mutex = nullptr;
+    std::mutex command_mutex;
     std::atomic<bool> is_running{false};
     std::thread rx_thread;
 
@@ -135,17 +95,18 @@ public:
     ~DeviceX();
 
     bool Init(const std::string& iface, int dev_idx,
-              std::vector<Motor_CAN_Struct>* data_ptr, TopoMapper* mapper_ptr);
+              std::vector<Motor_CAN_Struct>* data_ptr, MotorMapper* mapper_ptr,
+              std::mutex* motor_mutex);
 
     bool SendCommand(int& motor_index);
     bool EnableMotor(int& motor_index);
     bool DisableMotor(int& motor_index);
-    void ClearError(int& motor_index);
-    void SetZero(int& motor_index);
+    bool ClearError(int& motor_index);
+    bool SetZero(int& motor_index);
     bool SetMode(int& motor_index, int mode);
     bool ConfigureHaitaiMitLimits(int& motor_index);
     bool QueryPos(int& motor_index);
-    void QueryVersion(int& motor_index);
+    bool QueryVersion(int& motor_index);
     unsigned long long EnobufsDropCount() const;
     bool SocketReady() const;
     const std::string& InterfaceName() const;
@@ -161,16 +122,14 @@ private:
     bool sendExtendedIdFrame(uint32_t can_id, const uint8_t* data, uint8_t dlc = 8);
     bool sendExtendedIdFdFrame(uint32_t can_id, const uint8_t* data, uint8_t len);
     bool sendStandardFrame(uint32_t can_id, const uint8_t* data, uint8_t dlc = 8);
-    bool sendStandardFdFrame(uint32_t can_id, const uint8_t* data, uint8_t len, bool brs);
-    bool sendRawFrame(uint8_t chan, uint32_t type, uint16_t data_area, uint8_t motor_id, uint8_t* data);
     std::atomic<unsigned long long> enobufs_drop_count{0};
     std::atomic<unsigned long long> last_enobufs_log_ms{0};
 
     // Type 1 (LimX)
     bool EnableMotor_Type1(int& motor_index);
     bool DisableMotor_Type1(int& motor_index);
-    void ClearError_Type1(int& motor_index);
-    void SetZero_Type1(int& motor_index);
+    bool ClearError_Type1(int& motor_index);
+    bool SetZero_Type1(int& motor_index, std::unique_lock<std::mutex>& lock);
     bool SetMode_Type1(int& motor_index, int mode);
     bool SendCommand_Type1(int& motor_index);
     bool QueryPos_Type1(int& motor_index);
@@ -178,8 +137,8 @@ private:
     // Type 2 (LK)
     bool EnableMotor_Type2(int& motor_index);
     bool DisableMotor_Type2(int& motor_index);
-    void ClearError_Type2(int& motor_index);
-    void SetZero_Type2(int& motor_index);
+    bool ClearError_Type2(int& motor_index);
+    bool SetZero_Type2(int& motor_index);
     bool SetMode_Type2(int& motor_index, int mode);
     bool SendCommand_Type2(int& motor_index);
     bool QueryPos_Type2(int& motor_index);
@@ -187,8 +146,8 @@ private:
     // Type 3 (DM)
     bool EnableMotor_Type3(int& motor_index);
     bool DisableMotor_Type3(int& motor_index);
-    void ClearError_Type3(int& motor_index);
-    void SetZero_Type3(int& motor_index);
+    bool ClearError_Type3(int& motor_index);
+    bool SetZero_Type3(int& motor_index);
     bool SetMode_Type3(int& motor_index, int mode);
     bool SendCommand_Type3(int& motor_index);
     bool QueryPos_Type3(int& motor_index);
@@ -196,47 +155,37 @@ private:
     // Type 5 (HighTorque/高擎)
     bool EnableMotor_Type5(int& motor_index);
     bool DisableMotor_Type5(int& motor_index);
-    void ClearError_Type5(int& motor_index);
-    void SetZero_Type5(int& motor_index);
+    bool ClearError_Type5(int& motor_index, std::unique_lock<std::mutex>& lock);
+    bool SetZero_Type5(int& motor_index);
     bool SetMode_Type5(int& motor_index, int mode);
     bool SendCommand_Type5(int& motor_index);
     bool QueryPos_Type5(int& motor_index);
 
-    // Type 6 (AgiBot PowerFlow L28/PFL28)
-    bool EnableMotor_Type6(int& motor_index);
-    bool DisableMotor_Type6(int& motor_index);
-    void ClearError_Type6(int& motor_index);
-    void SetZero_Type6(int& motor_index);
-    bool SetMode_Type6(int& motor_index, int mode);
-    bool SendCommand_Type6(int& motor_index);
-    bool SendCommand_Type6_XyberBroadcast(int& motor_index);
-    bool QueryPos_Type6(int& motor_index);
-
     // Type 7 (Haitai/海泰)
     bool EnableMotor_Type7(int& motor_index);
     bool DisableMotor_Type7(int& motor_index);
-    void ClearError_Type7(int& motor_index);
-    void SetZero_Type7(int& motor_index);
+    bool ClearError_Type7(int& motor_index);
+    bool SetZero_Type7(int& motor_index);
     bool SetMode_Type7(int& motor_index, int mode);
     bool SendCommand_Type7(int& motor_index);
     bool QueryPos_Type7(int& motor_index);
-    void QueryVersion_Type7(int& motor_index);
+    bool QueryVersion_Type7(int& motor_index);
 
     // Type 8 (ENCOS EC-A series)
-    bool EnableMotor_Type8(int& motor_index);
+    bool EnableMotor_Type8(int& motor_index, std::unique_lock<std::mutex>& lock);
     bool DisableMotor_Type8(int& motor_index);
-    void ClearError_Type8(int& motor_index);
-    void SetZero_Type8(int& motor_index);
+    bool ClearError_Type8(int& motor_index, std::unique_lock<std::mutex>& lock);
+    bool SetZero_Type8(int& motor_index, std::unique_lock<std::mutex>& lock);
     bool SetMode_Type8(int& motor_index, int mode);
     bool SendCommand_Type8(int& motor_index);
-    bool QueryPos_Type8(int& motor_index);
+    bool QueryPos_Type8(int& motor_index, std::unique_lock<std::mutex>& lock);
 
     // Type 9 (JC CAN servo)
-    bool EnableMotor_Type9(int& motor_index);
+    bool EnableMotor_Type9(int& motor_index, std::unique_lock<std::mutex>& lock);
     bool DisableMotor_Type9(int& motor_index);
-    void ClearError_Type9(int& motor_index);
-    void SetZero_Type9(int& motor_index);
+    bool ClearError_Type9(int& motor_index);
+    bool SetZero_Type9(int& motor_index);
     bool SetMode_Type9(int& motor_index, int mode);
-    bool SendCommand_Type9(int& motor_index);
+    bool SendCommand_Type9(int& motor_index, std::unique_lock<std::mutex>& lock);
     bool QueryPos_Type9(int& motor_index);
 };

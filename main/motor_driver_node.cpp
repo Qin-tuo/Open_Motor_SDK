@@ -2,9 +2,13 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
+#include <functional>
+#include <limits>
 #include <map>
 #include <memory>
 #include <string>
+#include <stdexcept>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -26,23 +30,33 @@ public:
         declare_parameter<double>("rate_hz", 100.0);
         declare_parameter<bool>("auto_enable", false);
         declare_parameter<int>("default_mode", -1);
+        declare_parameter<int>("command_timeout_ms", 100);
+        declare_parameter<int>("feedback_timeout_ms", 500);
 
         const std::string config = get_parameter("config").as_string();
         const double rate_hz = std::max(1.0, get_parameter("rate_hz").as_double());
+        feedback_timeout_ms_ = static_cast<uint64_t>(
+            std::max<int64_t>(1, get_parameter("feedback_timeout_ms").as_int()));
+
         robot_ = std::make_unique<BaseRobot>(config);
+        robot_->SetCommandTimeout(std::chrono::milliseconds(
+            std::max<int64_t>(0, get_parameter("command_timeout_ms").as_int())));
         build_indexes();
         create_channel_interfaces();
 
         const int default_mode = static_cast<int>(get_parameter("default_mode").as_int());
         if (default_mode >= 0) {
-            for (int i = 0; i < static_cast<int>(robot_->global_motors.size()); ++i) {
-                robot_->SetMode_N(i, default_mode);
+            for (int i = 0; i < static_cast<int>(robot_->MotorCount()); ++i) {
+                if (!robot_->SetMode_N(i, default_mode)) {
+                    throw std::runtime_error("Failed to set default motor mode");
+                }
             }
         }
 
         if (get_parameter("auto_enable").as_bool()) {
-            robot_->ClearError_All();
-            robot_->EnableAll();
+            if (!robot_->EnableAll()) {
+                throw std::runtime_error("Failed to auto-enable all motors");
+            }
         }
 
         const auto period = std::chrono::duration<double>(1.0 / rate_hz);
@@ -51,7 +65,7 @@ public:
             std::bind(&MotorDriverNode::tick, this));
 
         RCLCPP_INFO(get_logger(), "motor driver node ready: motors=%zu channels=%zu",
-                    robot_->global_motors.size(), channels_.size());
+                    robot_->MotorCount(), channels_.size());
     }
 
 private:
@@ -71,67 +85,60 @@ private:
 
     void build_indexes() {
         channels_.clear();
-        if (!robot_) return;
-
-        for (int i = 0; i < static_cast<int>(robot_->global_motors.size()); ++i) {
-            const auto& info = robot_->global_motors[static_cast<std::size_t>(i)].info;
-
+        for (int i = 0; i < static_cast<int>(robot_->MotorCount()); ++i) {
+            Motor_CAN_Info_Struct info;
+            if (!robot_->GetMotorInfo(i, info)) {
+                throw std::runtime_error("Failed to read motor configuration");
+            }
             auto& channel = channels_[info.chan];
             channel.chan = info.chan;
             channel.motor_indices.push_back(i);
-            channel.name_to_index[info.name] = i;
+            channel.name_to_index.emplace(info.name, i);
         }
     }
 
     void create_channel_interfaces() {
+        const rclcpp::QoS command_qos(rclcpp::KeepLast(1));
         for (auto& entry : channels_) {
             auto& channel = entry.second;
             const std::string prefix = "/can" + std::to_string(channel.chan);
 
             channel.command_sub = create_subscription<sensor_msgs::msg::JointState>(
-                prefix + "/command", 10,
+                prefix + "/command", command_qos,
                 [this, chan = channel.chan](sensor_msgs::msg::JointState::SharedPtr msg) {
                     on_command(chan, std::move(msg));
                 });
             channel.state_pub = create_publisher<sensor_msgs::msg::JointState>(
-                prefix + "/joint_states", 10);
+                prefix + "/joint_states", rclcpp::QoS(10));
             channel.status_pub = create_publisher<khcan::msg::MotorStatusArray>(
-                prefix + "/status_feedback", 10);
+                prefix + "/status_feedback", rclcpp::QoS(10));
             channel.enable_srv = create_service<std_srvs::srv::Trigger>(
                 prefix + "/enable",
-                [this, chan = channel.chan](const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
+                [this, chan = channel.chan](const std::shared_ptr<std_srvs::srv::Trigger::Request>,
                                             std::shared_ptr<std_srvs::srv::Trigger::Response> res) {
-                    (void)req;
-                    for_channel(chan, [this](int idx) { robot_->Enable_N(idx); });
-                    res->success = true;
-                    res->message = "enabled";
+                    res->success = for_channel(chan, [this](int idx) { return robot_->Enable_N(idx); });
+                    res->message = res->success ? "enabled" : "one or more enable commands failed";
                 });
             channel.disable_srv = create_service<std_srvs::srv::Trigger>(
                 prefix + "/disable",
-                [this, chan = channel.chan](const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
+                [this, chan = channel.chan](const std::shared_ptr<std_srvs::srv::Trigger::Request>,
                                             std::shared_ptr<std_srvs::srv::Trigger::Response> res) {
-                    (void)req;
-                    for_channel(chan, [this](int idx) { robot_->Disable_N(idx); });
-                    res->success = true;
-                    res->message = "disabled";
+                    res->success = for_channel(chan, [this](int idx) { return robot_->Disable_N(idx); });
+                    res->message = res->success ? "disabled" : "one or more disable commands failed";
                 });
             channel.clear_srv = create_service<std_srvs::srv::Trigger>(
                 prefix + "/clear_error",
-                [this, chan = channel.chan](const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
+                [this, chan = channel.chan](const std::shared_ptr<std_srvs::srv::Trigger::Request>,
                                             std::shared_ptr<std_srvs::srv::Trigger::Response> res) {
-                    (void)req;
-                    for_channel(chan, [this](int idx) { robot_->ClearError_N(idx); });
-                    res->success = true;
-                    res->message = "clear_error sent";
+                    res->success = for_channel(chan, [this](int idx) { return robot_->ClearError_N(idx); });
+                    res->message = res->success ? "clear_error sent" : "one or more clear commands failed";
                 });
             channel.set_zero_srv = create_service<std_srvs::srv::Trigger>(
                 prefix + "/set_zero",
-                [this, chan = channel.chan](const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
+                [this, chan = channel.chan](const std::shared_ptr<std_srvs::srv::Trigger::Request>,
                                             std::shared_ptr<std_srvs::srv::Trigger::Response> res) {
-                    (void)req;
-                    for_channel(chan, [this](int idx) { robot_->SetZero_N(idx); });
-                    res->success = true;
-                    res->message = "set_zero sent";
+                    res->success = for_channel(chan, [this](int idx) { return robot_->SetZero_N(idx); });
+                    res->message = res->success ? "set_zero sent" : "one or more zero commands failed";
                 });
             channel.set_mode_srv = create_service<khcan::srv::SetMotorMode>(
                 prefix + "/set_mode",
@@ -143,19 +150,18 @@ private:
     }
 
     template <typename Func>
-    void for_channel(int chan, Func func) {
-        auto it = channels_.find(chan);
-        if (it == channels_.end()) return;
-        for (int idx : it->second.motor_indices) {
-            func(idx);
-        }
+    bool for_channel(int chan, Func func) {
+        const auto it = channels_.find(chan);
+        if (it == channels_.end()) return false;
+        bool ok = true;
+        for (int idx : it->second.motor_indices) ok = func(idx) && ok;
+        return ok;
     }
 
     void on_command(int chan, sensor_msgs::msg::JointState::SharedPtr msg) {
-        if (!robot_) return;
-        auto it = channels_.find(chan);
+        const auto it = channels_.find(chan);
         if (it == channels_.end()) return;
-        auto& channel = it->second;
+        const auto& channel = it->second;
 
         std::vector<int> staged;
         if (!msg->name.empty()) {
@@ -167,155 +173,154 @@ private:
                                          msg->name[i].c_str(), chan);
                     continue;
                 }
-                if (stage_one(name_it->second, *msg, i)) {
-                    staged.push_back(name_it->second);
-                }
+                if (stage_one(name_it->second, *msg, i)) staged.push_back(name_it->second);
             }
         } else {
             const std::size_t requested_count = std::max({
-                msg->position.size(),
-                msg->velocity.size(),
-                msg->effort.size(),
-            });
+                msg->position.size(), msg->velocity.size(), msg->effort.size()});
             const std::size_t count = std::min(requested_count, channel.motor_indices.size());
             for (std::size_t i = 0; i < count; ++i) {
-                const int motor_index = channel.motor_indices[i];
-                if (stage_one(motor_index, *msg, i)) {
-                    staged.push_back(motor_index);
+                if (stage_one(channel.motor_indices[i], *msg, i)) {
+                    staged.push_back(channel.motor_indices[i]);
                 }
             }
         }
 
         for (int motor_index : staged) {
-            robot_->Flush_N(motor_index);
+            if (!robot_->Flush_N(motor_index)) {
+                RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 2000,
+                                      "command send failed on can%d", chan);
+            }
         }
     }
 
-    bool stage_one(int motor_index, const sensor_msgs::msg::JointState& msg, std::size_t src_index) {
-        if (motor_index < 0 ||
-            static_cast<std::size_t>(motor_index) >= robot_->global_motors.size()) {
+    bool stage_one(int motor_index, const sensor_msgs::msg::JointState& msg,
+                   std::size_t source_index) {
+        if (source_index >= msg.position.size() && source_index >= msg.velocity.size() &&
+            source_index >= msg.effort.size()) {
             return false;
         }
-
-        const auto& motor = robot_->global_motors[static_cast<std::size_t>(motor_index)];
-        MotorCmdVec cmd {};
-        cmd.p = (src_index < msg.position.size())
-            ? static_cast<float>(msg.position[src_index])
-            : motor.send.position;
-        cmd.v = (src_index < msg.velocity.size())
-            ? static_cast<float>(msg.velocity[src_index])
-            : motor.send.speed;
-        cmd.t = (src_index < msg.effort.size())
-            ? static_cast<float>(msg.effort[src_index])
-            : motor.send.torque;
-        return robot_->Stage_N(motor_index, cmd);
+        MotorCmdVec command;
+        if (!robot_->GetCommand_N(motor_index, command)) return false;
+        if (source_index < msg.position.size()) command.p = static_cast<float>(msg.position[source_index]);
+        if (source_index < msg.velocity.size()) command.v = static_cast<float>(msg.velocity[source_index]);
+        if (source_index < msg.effort.size()) command.t = static_cast<float>(msg.effort[source_index]);
+        return robot_->Stage_N(motor_index, command);
     }
 
     void tick() {
-        if (!robot_) return;
-        robot_->QueryPos_ALL();
-        for (auto& entry : channels_) {
-            publish_channel_state(entry.second);
+        const int expired = robot_->CheckCommandTimeouts();
+        if (expired > 0) {
+            RCLCPP_WARN(get_logger(), "command watchdog disabled %d motor(s)", expired);
         }
+        if (!robot_->QueryPos_ALL()) {
+            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                                 "one or more feedback queries failed");
+        }
+        for (auto& entry : channels_) publish_channel_state(entry.second);
     }
 
     void publish_channel_state(ChannelContext& channel) {
         const auto stamp = now();
+        const uint64_t now_ns = steady_time_ns();
 
-        sensor_msgs::msg::JointState msg;
-        msg.header.stamp = stamp;
-        msg.name.reserve(channel.motor_indices.size());
-        msg.position.reserve(channel.motor_indices.size());
-        msg.velocity.reserve(channel.motor_indices.size());
-        msg.effort.reserve(channel.motor_indices.size());
-
+        sensor_msgs::msg::JointState state;
+        state.header.stamp = stamp;
         khcan::msg::MotorStatusArray status;
         status.header.stamp = stamp;
-        status.motors.reserve(channel.motor_indices.size());
 
-        for (int idx : channel.motor_indices) {
-            const auto& motor = robot_->global_motors[static_cast<std::size_t>(idx)];
+        for (int index : channel.motor_indices) {
+            Motor_CAN_Struct motor;
+            if (!robot_->GetMotorSnapshot(index, motor)) continue;
             const auto& recv = motor.recv;
 
-            msg.name.push_back(motor.info.name);
-            msg.position.push_back(recv.current_position_f.load());
-            msg.velocity.push_back(recv.current_speed_f.load());
-            msg.effort.push_back(recv.current_torque_f.load());
+            state.name.push_back(motor.info.name);
+            state.position.push_back(recv.current_position_f.load());
+            state.velocity.push_back(recv.current_speed_f.load());
+            state.effort.push_back(recv.current_torque_f.load());
 
-            khcan::msg::MotorStatus s;
-            s.name = motor.info.name;
-            s.motor_id = recv.motor_id;
-            s.mode = recv.mode;
-            s.motor_state = recv.motor_state;
-            s.fault_code = recv.fault_message.load();
-            s.position = recv.current_position_f.load();
-            s.speed = recv.current_speed_f.load();
-            s.torque = recv.current_torque_f.load();
-            s.current = recv.current_iq_f.load();
-            s.temperature = recv.current_temp_f.load();
-            status.motors.push_back(std::move(s));
+            const uint64_t age_ms = recv.last_feedback_ns == 0
+                ? std::numeric_limits<uint32_t>::max()
+                : (now_ns - recv.last_feedback_ns) / 1000000ULL;
+            khcan::msg::MotorStatus item;
+            item.name = motor.info.name;
+            item.motor_id = recv.motor_id;
+            item.mode = recv.mode;
+            item.motor_state = recv.motor_state;
+            item.fault_code = recv.fault_message.load();
+            item.online = recv.last_feedback_ns != 0 && age_ms <= feedback_timeout_ms_;
+            item.feedback_age_ms = static_cast<uint32_t>(
+                std::min<uint64_t>(age_ms, std::numeric_limits<uint32_t>::max()));
+            item.position = recv.current_position_f.load();
+            item.speed = recv.current_speed_f.load();
+            item.torque = recv.current_torque_f.load();
+            item.current = recv.current_iq_f.load();
+            item.temperature = recv.current_temp_f.load();
+            status.motors.push_back(std::move(item));
         }
-        channel.state_pub->publish(msg);
+        channel.state_pub->publish(state);
         channel.status_pub->publish(status);
     }
 
     void on_set_mode(int chan,
                      const std::shared_ptr<khcan::srv::SetMotorMode::Request> req,
                      std::shared_ptr<khcan::srv::SetMotorMode::Response> res) {
-        auto it = channels_.find(chan);
+        const auto it = channels_.find(chan);
         if (it == channels_.end()) {
             res->success = false;
             res->message = "channel not found";
             return;
         }
 
-        std::vector<std::string> unknown;
+        bool ok = true;
         int changed = 0;
+        std::vector<std::string> unknown;
         if (req->names.empty()) {
             for (int idx : it->second.motor_indices) {
-                if (robot_->SetMode_N(idx, req->mode)) {
-                    ++changed;
-                }
+                const bool changed_ok = robot_->SetMode_N(idx, req->mode);
+                ok = changed_ok && ok;
+                if (changed_ok) ++changed;
             }
         } else {
             for (const auto& name : req->names) {
                 const auto name_it = it->second.name_to_index.find(name);
                 if (name_it == it->second.name_to_index.end()) {
                     unknown.push_back(name);
+                    ok = false;
                     continue;
                 }
-                if (robot_->SetMode_N(name_it->second, req->mode)) {
-                    ++changed;
-                }
+                const bool changed_ok = robot_->SetMode_N(name_it->second, req->mode);
+                ok = changed_ok && ok;
+                if (changed_ok) ++changed;
             }
         }
 
-        if (!unknown.empty()) {
-            std::string message = "unknown motors:";
-            for (const auto& name : unknown) {
-                message += " " + name;
-            }
-            if (changed > 0) {
-                message += "; changed " + std::to_string(changed) + " motors";
-            }
-            res->success = false;
-            res->message = message;
-            return;
-        }
-
-        res->success = true;
+        res->success = ok;
         res->message = "mode " + std::to_string(req->mode) + " set for " +
                        std::to_string(changed) + " motors";
+        if (!unknown.empty()) {
+            res->message += "; unknown:";
+            for (const auto& name : unknown) res->message += " " + name;
+        } else if (!ok) {
+            res->message += "; one or more commands failed";
+        }
     }
 
     std::unique_ptr<BaseRobot> robot_;
     std::map<int, ChannelContext> channels_;
     rclcpp::TimerBase::SharedPtr timer_;
+    uint64_t feedback_timeout_ms_ = 500;
 };
 
 int main(int argc, char** argv) {
     rclcpp::init(argc, argv);
-    rclcpp::spin(std::make_shared<MotorDriverNode>());
+    try {
+        rclcpp::spin(std::make_shared<MotorDriverNode>());
+    } catch (const std::exception& error) {
+        std::fprintf(stderr, "motor_driver_node: %s\n", error.what());
+        rclcpp::shutdown();
+        return 1;
+    }
     rclcpp::shutdown();
     return 0;
 }

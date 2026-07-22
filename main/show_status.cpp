@@ -3,6 +3,8 @@
 #include <ament_index_cpp/get_package_share_directory.hpp>
 
 #include <chrono>
+#include <atomic>
+#include <csignal>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -12,6 +14,12 @@
 #include <thread>
 
 namespace {
+
+std::atomic<bool> running{true};
+
+void handleSignal(int) {
+    running = false;
+}
 
 void printUsage(const char* argv0) {
     std::cout
@@ -65,6 +73,8 @@ double parsePositiveDouble(const std::string& value, const std::string& option_n
 }  // namespace
 
 int main(int argc, char** argv) {
+    std::signal(SIGINT, handleSignal);
+    std::signal(SIGTERM, handleSignal);
     bool resolve_config_only = false;
     bool clear_errors = false;
     bool enable = false;
@@ -130,18 +140,19 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    try {
     BaseRobot robot(config_path, disable_on_exit);
 
     if (disable_first) {
-        robot.DisableAll();
+        if (!robot.DisableAll()) throw std::runtime_error("disable-first failed");
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
     if (clear_errors) {
-        robot.ClearError_All();
+        if (!robot.ClearError_All()) throw std::runtime_error("clear-errors failed");
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
     if (enable) {
-        robot.EnableAll();
+        if (!robot.EnableAll()) throw std::runtime_error("enable failed");
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 
@@ -151,7 +162,7 @@ int main(int argc, char** argv) {
     std::cout << "=== Robot Position Monitor (" << target_hz << "Hz) ===" << std::endl;
     std::cout << "query-only by default; Press Ctrl+C to exit." << std::endl;
 
-    while (true) {
+    while (running.load()) {
         const auto start_time = std::chrono::steady_clock::now();
 
         robot.QueryPos_ALL();
@@ -167,4 +178,8 @@ int main(int argc, char** argv) {
     }
 
     return 0;
+    } catch (const std::exception& ex) {
+        std::cerr << "[show_status] " << ex.what() << std::endl;
+        return 1;
+    }
 }

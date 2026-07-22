@@ -26,6 +26,8 @@ uint8   motor_id
 uint8   mode
 uint8   motor_state
 uint8   fault_code      # = recv.fault_message
+bool    online           # feedback age <= feedback_timeout_ms
+uint32  feedback_age_ms  # monotonic-clock age, max uint32 before first feedback
 float32 position        # rad,  recv.current_position_f
 float32 speed           # rad/s, recv.current_speed_f
 float32 torque          # N·m,  recv.current_torque_f

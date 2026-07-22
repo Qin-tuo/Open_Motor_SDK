@@ -1,5 +1,7 @@
 #include "robot.hpp"
 
+#include <ament_index_cpp/get_package_share_directory.hpp>
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -32,24 +34,28 @@ static int mit_mode_for_api_type(int api_type) {
 
 static int select_target_motor_index(const BaseRobot& robot) {
     int num1_idx = -1;
-    for (int i = 0; i < static_cast<int>(robot.global_motors.size()); ++i) {
-        if (robot.global_motors[i].info.num == 1) {
+    for (int i = 0; i < static_cast<int>(robot.MotorCount()); ++i) {
+        Motor_CAN_Info_Struct info;
+        if (robot.GetMotorInfo(i, info) && info.num == 1) {
             num1_idx = i;
             break;
         }
     }
 
     if (num1_idx >= 0) {
-        if (supports_mit_mode(robot.global_motors[num1_idx].info.api_type)) {
+        Motor_CAN_Info_Struct info;
+        robot.GetMotorInfo(num1_idx, info);
+        if (supports_mit_mode(info.api_type)) {
             return num1_idx;
         }
         std::cerr << "[Warn] Motor num=1 exists but api_type="
-                  << robot.global_motors[num1_idx].info.api_type
+                  << info.api_type
                   << " does not support MIT test in this tool." << std::endl;
     }
 
-    for (int i = 0; i < static_cast<int>(robot.global_motors.size()); ++i) {
-        if (supports_mit_mode(robot.global_motors[i].info.api_type)) {
+    for (int i = 0; i < static_cast<int>(robot.MotorCount()); ++i) {
+        Motor_CAN_Info_Struct info;
+        if (robot.GetMotorInfo(i, info) && supports_mit_mode(info.api_type)) {
             return i;
         }
     }
@@ -58,7 +64,8 @@ static int select_target_motor_index(const BaseRobot& robot) {
 }
 
 static void prepare_motor_for_mit(BaseRobot& robot, int target_idx) {
-    const auto& info = robot.global_motors[target_idx].info;
+    Motor_CAN_Info_Struct info;
+    if (!robot.GetMotorInfo(target_idx, info)) return;
 
     // Type5 clear-error internally maps to reset flow, avoid sending stop first.
     if (info.api_type == 5) {
@@ -93,10 +100,11 @@ static void prepare_motor_for_mit(BaseRobot& robot, int target_idx) {
 int main() {
     std::signal(SIGINT, handle_sigint);
 
-    const std::string config_path = "config/motor.toml";
+    const std::string config_path =
+        ament_index_cpp::get_package_share_directory("khcan") + "/config/motor.toml";
     BaseRobot robot(config_path);
 
-    if (robot.global_motors.empty()) {
+    if (robot.MotorCount() == 0) {
         std::cerr << "[Error] No motor configured in " << config_path << std::endl;
         return 1;
     }
@@ -107,7 +115,8 @@ int main() {
         return 1;
     }
 
-    const auto& info = robot.global_motors[target_idx].info;
+    Motor_CAN_Info_Struct info;
+    if (!robot.GetMotorInfo(target_idx, info)) return 1;
     std::cout << "[Info] Target motor: idx=" << target_idx
               << ", num=" << info.num
               << ", name=" << info.name
@@ -136,7 +145,9 @@ int main() {
 
     std::cout << "Step 1: Moving slowly to zero..." << std::endl;
 
-    const float start_pos = robot.global_motors[target_idx].recv.current_position_f.load();
+    Motor_CAN_Struct start_snapshot;
+    if (!robot.GetMotorSnapshot(target_idx, start_snapshot)) return 1;
+    const float start_pos = start_snapshot.recv.current_position_f.load();
     const int warmup_steps = 100; // 2 s at 20 ms
     for (int i = 0; i <= warmup_steps; ++i) {
         const float k = static_cast<float>(i) / static_cast<float>(warmup_steps);
@@ -168,7 +179,8 @@ int main() {
         robot.Move_N(target_idx, cmd);
 
         if (i % 50 == 0) {
-            const auto& m = robot.global_motors[target_idx];
+            Motor_CAN_Struct m;
+            if (!robot.GetMotorSnapshot(target_idx, m)) break;
             std::cout << "[i=" << i << "] target=" << val
                       << " p=" << m.recv.current_position_f.load()
                       << " v=" << m.recv.current_speed_f.load()

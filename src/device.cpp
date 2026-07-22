@@ -24,10 +24,6 @@
 #include <sstream>
 #include <thread>
 
-#include <fcntl.h>
-#include <sys/select.h>
-#include <termios.h>
-
 namespace encos {
 
 struct Limits {
@@ -41,6 +37,8 @@ struct Limits {
     float kd_max = 5.0f;
     float t_min = -30.0f;
     float t_max = 30.0f;
+    float current_min = 0.0f;
+    float current_max = 0.0f;
 };
 
 struct CommandFrame {
@@ -74,8 +72,6 @@ constexpr float DEG_TO_RAD_LOCAL = 0.017453293f;
 constexpr float RAD_TO_RPM = 60.0f / TWO_PI_LOCAL;
 constexpr float RPM_TO_RAD = TWO_PI_LOCAL / 60.0f;
 constexpr float DEFAULT_CURRENT_LIMIT_A = 10.0f;
-constexpr float DEFAULT_CURRENT_FB_MIN_A = -90.0f;
-constexpr float DEFAULT_CURRENT_FB_MAX_A = 90.0f;
 
 constexpr uint8_t MODE_MIT = 0x00;
 constexpr uint8_t MODE_POSITION = 0x01;
@@ -178,8 +174,8 @@ int16_t signed_cmd_to_raw(float value) {
     return static_cast<int16_t>(std::lround(clipped * 100.0f));
 }
 
-float raw_to_current_default(int raw_u12) {
-    return uint_to_float(raw_u12, DEFAULT_CURRENT_FB_MIN_A, DEFAULT_CURRENT_FB_MAX_A, 12);
+float raw_to_current(const Limits& limits, int raw_u12) {
+    return uint_to_float(raw_u12, limits.current_min, limits.current_max, 12);
 }
 
 float temp_raw_to_deg(uint8_t raw_temp) {
@@ -246,6 +242,8 @@ Limits limits_from_info(const Motor_CAN_Info_Struct& info) {
     limits.kd_max = info.kd_max;
     limits.t_min = info.t_min;
     limits.t_max = info.t_max;
+    limits.current_min = info.current_min;
+    limits.current_max = info.current_max;
     return limits;
 }
 
@@ -369,7 +367,6 @@ Feedback parse_feedback(const uint8_t* data, uint8_t len, const Limits& limits) 
         return feedback;
     }
 
-    feedback.valid = true;
     feedback.type = feedback_type(data[0]);
     feedback.error = feedback_error(data[0]);
 
@@ -381,11 +378,13 @@ Feedback parse_feedback(const uint8_t* data, uint8_t len, const Limits& limits) 
 
             feedback.has_position = true;
             feedback.has_speed = true;
-            feedback.has_current = true;
+            feedback.has_current = limits.current_min < limits.current_max;
             feedback.has_temperature = true;
             feedback.position_rad = raw_to_pos(limits, pos_raw);
             feedback.speed_rad_s = raw_to_spd(limits, spd_raw);
-            feedback.current_a = raw_to_current_default(static_cast<int>(cur_raw));
+            if (feedback.has_current) {
+                feedback.current_a = raw_to_current(limits, static_cast<int>(cur_raw));
+            }
             feedback.temperature_c = temp_raw_to_deg(data[6]);
         }
         feedback.mode = 1;
@@ -436,12 +435,23 @@ Feedback parse_feedback(const uint8_t* data, uint8_t len, const Limits& limits) 
         }
     }
 
+    feedback.valid = feedback.has_position || feedback.has_speed ||
+                     feedback.has_current || feedback.has_temperature ||
+                     feedback.has_state;
     return feedback;
 }
 
 }  // namespace encos
 
 namespace {
+
+template <typename Rep, typename Period>
+void sleep_without_motor_lock(std::unique_lock<std::mutex>& lock,
+                              const std::chrono::duration<Rep, Period>& delay) {
+    lock.unlock();
+    std::this_thread::sleep_for(delay);
+    lock.lock();
+}
 
 constexpr float kHaitaiTwoPi = 6.28318530718f;
 constexpr float kHaitaiPi = 3.14159265359f;
@@ -545,59 +555,6 @@ float haitai_uint_to_float(uint32_t raw, float min_value, float max_value, uint8
     const uint32_t max_raw = (1U << bits) - 1U;
     const float span = max_value - min_value;
     return static_cast<float>(raw) * span / static_cast<float>(max_raw) + min_value;
-}
-
-constexpr int kFeetechSCSPositionMax = 1023;
-constexpr float kFeetechSCS0037RangeRad = 4.712389f; // 270 deg
-constexpr float kFeetechRpmToRadS = 6.28318530718f / 60.0f;
-constexpr int kFeetechReadTimeoutMs = 100;
-
-constexpr uint8_t kFeetechInstRead = 0x02;
-constexpr uint8_t kFeetechInstWrite = 0x03;
-
-constexpr uint8_t kFeetechServoIdAddr = 5;
-constexpr uint8_t kFeetechTorqueEnableAddr = 40;
-constexpr uint8_t kFeetechGoalPositionAddr = 42;
-constexpr uint8_t kFeetechEepromLockAddr = 48;
-constexpr uint8_t kFeetechPresentPositionAddr = 56;
-constexpr uint8_t kFeetechPresentSpeedAddr = 58;
-constexpr uint8_t kFeetechPresentLoadAddr = 60;
-constexpr uint8_t kFeetechPresentTemperatureAddr = 63;
-
-bool feetech_valid_motor_index(const std::vector<Motor_CAN_Struct>* motors, int idx) {
-    return motors && idx >= 0 && static_cast<std::size_t>(idx) < motors->size();
-}
-
-speed_t feetech_baud_to_termios(int baud) {
-    switch (baud) {
-        case 9600: return B9600;
-        case 19200: return B19200;
-        case 38400: return B38400;
-        case 57600: return B57600;
-        case 115200: return B115200;
-        case 230400: return B230400;
-        case 500000: return B500000;
-        case 1000000: return B1000000;
-        default: return B500000;
-    }
-}
-
-uint8_t feetech_checksum(const uint8_t* data, std::size_t length) {
-    uint8_t sum = 0;
-    for (std::size_t i = 0; i < length; ++i) {
-        sum = static_cast<uint8_t>(sum + data[i]);
-    }
-    return static_cast<uint8_t>(~sum);
-}
-
-void feetech_write_be_u16(uint8_t* out, int value) {
-    const uint16_t v = static_cast<uint16_t>(std::max(0, std::min(0xFFFF, value)));
-    out[0] = static_cast<uint8_t>((v >> 8) & 0xFF);
-    out[1] = static_cast<uint8_t>(v & 0xFF);
-}
-
-int feetech_read_be_u16(const uint8_t* data) {
-    return (static_cast<int>(data[0]) << 8) | static_cast<int>(data[1]);
 }
 
 float jc_rad_to_deg_x100(float rad) {
@@ -808,8 +765,7 @@ bool parse_haitai_feedback(uint32_t can_id, const std::array<uint8_t, 8>& data,
         case 0xC4:
             if (dlc != 7) return false;
             out.has_position = true;
-            out.position_rad = haitai_wrap_to_signed_pi(
-                haitai_count_to_rad(haitai_read_le_u16(&data[1])));
+            out.position_rad = haitai_count_to_rad(haitai_read_le_i32(&data[3]));
             return true;
         case 0xA4:
             if (dlc != 8) return false;
@@ -847,10 +803,15 @@ bool parse_haitai_feedback(uint32_t can_id, const std::array<uint8_t, 8>& data,
             return true;
         case 0xF0:
             if (dlc != 7) return false;
-            out.has_mit_limits = true;
             out.mit_pos_max_rad = static_cast<float>(haitai_read_le_u16(&data[1])) * 0.1f;
             out.mit_vel_max_rad_s = static_cast<float>(haitai_read_le_u16(&data[3])) * 0.01f;
             out.mit_torque_max_nm = static_cast<float>(haitai_read_le_u16(&data[5])) * 0.01f;
+            if (!(out.mit_pos_max_rad > 0.0f) ||
+                !(out.mit_vel_max_rad_s > 0.0f) ||
+                !(out.mit_torque_max_nm > 0.0f)) {
+                return false;
+            }
+            out.has_mit_limits = true;
             return true;
         case 0xF1: {
             if (dlc != 7) return false;
@@ -877,400 +838,6 @@ bool parse_haitai_feedback(uint32_t can_id, const std::array<uint8_t, 8>& data,
         default:
             return false;
     }
-}
-
-FeetechServoDevice::~FeetechServoDevice() {
-    closeSerial();
-}
-
-bool FeetechServoDevice::Init(const std::string& port, int baud, int dev_idx,
-                              std::vector<Motor_CAN_Struct>* data_ptr,
-                              TopoMapper* mapper_ptr) {
-    port_ = port;
-    baud_ = baud;
-    device_global_index_ = dev_idx;
-    p_motors_data_ = data_ptr;
-    p_mapper_ = mapper_ptr;
-
-    is_open_ = openSerial();
-    if (!is_open_) {
-        std::cerr << "[Error] Failed to open Feetech serial port " << port_
-                  << " at " << baud_ << " baud." << std::endl;
-        return false;
-    }
-
-    std::cout << "[Info] Feetech serial ready on " << port_
-              << " @ " << baud_ << std::endl;
-    return true;
-}
-
-bool FeetechServoDevice::openSerial() {
-    closeSerial();
-    if (port_.empty()) {
-        return false;
-    }
-
-    fd_ = open(port_.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
-    if (fd_ < 0) {
-        std::cerr << "[Error] open(" << port_ << "): " << std::strerror(errno) << std::endl;
-        return false;
-    }
-
-    termios options {};
-    if (tcgetattr(fd_, &options) != 0) {
-        std::cerr << "[Error] tcgetattr(" << port_ << "): " << std::strerror(errno) << std::endl;
-        closeSerial();
-        return false;
-    }
-
-    cfmakeraw(&options);
-    const speed_t termios_baud = feetech_baud_to_termios(baud_);
-    cfsetispeed(&options, termios_baud);
-    cfsetospeed(&options, termios_baud);
-    options.c_cflag &= ~PARENB;
-    options.c_cflag &= ~CSTOPB;
-    options.c_cflag &= ~CSIZE;
-    options.c_cflag |= CS8 | CREAD | CLOCAL;
-    options.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
-    options.c_cc[VMIN] = 0;
-    options.c_cc[VTIME] = 0;
-
-    if (tcsetattr(fd_, TCSANOW, &options) != 0) {
-        std::cerr << "[Error] tcsetattr(" << port_ << "): " << std::strerror(errno) << std::endl;
-        closeSerial();
-        return false;
-    }
-
-    tcflush(fd_, TCIOFLUSH);
-    return true;
-}
-
-void FeetechServoDevice::closeSerial() {
-    if (fd_ >= 0) {
-        close(fd_);
-        fd_ = -1;
-    }
-    is_open_ = false;
-}
-
-int FeetechServoDevice::positionToCount(const Motor_CAN_Info_Struct& info,
-                                        float position_rad) const {
-    const float pos_min = (info.p_max > info.p_min) ? info.p_min : 0.0f;
-    const float pos_max = (info.p_max > info.p_min) ? info.p_max : kFeetechSCS0037RangeRad;
-    position_rad = std::max(pos_min, std::min(pos_max, position_rad));
-    const float ratio = (position_rad - pos_min) / (pos_max - pos_min);
-    return static_cast<int>(std::lround(ratio * static_cast<float>(kFeetechSCSPositionMax)));
-}
-
-float FeetechServoDevice::countToPosition(const Motor_CAN_Info_Struct& info, int count) const {
-    const float pos_min = (info.p_max > info.p_min) ? info.p_min : 0.0f;
-    const float pos_max = (info.p_max > info.p_min) ? info.p_max : kFeetechSCS0037RangeRad;
-    count = std::max(0, std::min(kFeetechSCSPositionMax, count));
-    const float ratio = static_cast<float>(count) / static_cast<float>(kFeetechSCSPositionMax);
-    return pos_min + ratio * (pos_max - pos_min);
-}
-
-int FeetechServoDevice::speedToCount(float speed_rad_s) const {
-    if (!std::isfinite(speed_rad_s) || speed_rad_s <= 0.0f) {
-        return 0;
-    }
-    const float rpm = speed_rad_s / kFeetechRpmToRadS;
-    const float clipped_rpm = std::max(0.0f, std::min(1023.0f, rpm));
-    return static_cast<int>(std::lround(clipped_rpm));
-}
-
-bool FeetechServoDevice::writePacket(uint8_t id, uint8_t instruction,
-                                     const uint8_t* params, std::size_t length) {
-    if (fd_ < 0 || length > 250) {
-        return false;
-    }
-
-    std::array<uint8_t, 256> packet {};
-    packet[0] = 0xFF;
-    packet[1] = 0xFF;
-    packet[2] = id;
-    packet[3] = static_cast<uint8_t>(length + 2);
-    packet[4] = instruction;
-    if (length > 0 && params) {
-        std::copy(params, params + length, packet.begin() + 5);
-    }
-    packet[5 + length] = feetech_checksum(packet.data() + 2, length + 3);
-
-    tcflush(fd_, TCIFLUSH);
-    const std::size_t packet_len = length + 6;
-    std::size_t sent = 0;
-    while (sent < packet_len) {
-        const ssize_t n = write(fd_, packet.data() + sent, packet_len - sent);
-        if (n > 0) {
-            sent += static_cast<std::size_t>(n);
-            continue;
-        }
-        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
-            continue;
-        }
-        return false;
-    }
-    tcdrain(fd_);
-    return true;
-}
-
-bool FeetechServoDevice::readStatusPacket(uint8_t expected_id, uint8_t* error,
-                                          uint8_t* data, std::size_t length) {
-    if (fd_ < 0 || length > 250) {
-        return false;
-    }
-
-    std::array<uint8_t, 256> packet {};
-    const std::size_t expected_len = length + 6;
-    std::size_t got = 0;
-
-    while (got < expected_len) {
-        fd_set read_set;
-        FD_ZERO(&read_set);
-        FD_SET(fd_, &read_set);
-
-        timeval timeout {};
-        timeout.tv_sec = 0;
-        timeout.tv_usec = kFeetechReadTimeoutMs * 1000;
-
-        const int ready = select(fd_ + 1, &read_set, nullptr, nullptr, &timeout);
-        if (ready <= 0) {
-            return false;
-        }
-
-        const ssize_t n = read(fd_, packet.data() + got, expected_len - got);
-        if (n > 0) {
-            got += static_cast<std::size_t>(n);
-            continue;
-        }
-        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
-            continue;
-        }
-        return false;
-    }
-
-    if (packet[0] != 0xFF || packet[1] != 0xFF || packet[2] != expected_id ||
-        packet[3] != static_cast<uint8_t>(length + 2)) {
-        return false;
-    }
-
-    if (feetech_checksum(packet.data() + 2, length + 3) != packet[expected_len - 1]) {
-        return false;
-    }
-
-    if (error) {
-        *error = packet[4];
-    }
-    if (length > 0 && data) {
-        std::copy(packet.begin() + 5, packet.begin() + 5 + static_cast<long>(length), data);
-    }
-    return true;
-}
-
-void FeetechServoDevice::drainInput(int timeout_ms) {
-    if (fd_ < 0) {
-        return;
-    }
-
-    std::array<uint8_t, 64> scratch {};
-    while (true) {
-        fd_set read_set;
-        FD_ZERO(&read_set);
-        FD_SET(fd_, &read_set);
-
-        timeval timeout {};
-        timeout.tv_sec = 0;
-        timeout.tv_usec = timeout_ms * 1000;
-
-        const int ready = select(fd_ + 1, &read_set, nullptr, nullptr, &timeout);
-        if (ready <= 0) {
-            return;
-        }
-
-        const ssize_t n = read(fd_, scratch.data(), scratch.size());
-        if (n <= 0 && !(errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
-            return;
-        }
-    }
-}
-
-bool FeetechServoDevice::writeRegister(int id, uint8_t address,
-                                       const uint8_t* data, std::size_t length) {
-    if (id < 0 || id > 253 || length > 248) {
-        return false;
-    }
-
-    std::array<uint8_t, 249> params {};
-    params[0] = address;
-    if (length > 0 && data) {
-        std::copy(data, data + length, params.begin() + 1);
-    }
-
-    if (!writePacket(static_cast<uint8_t>(id), kFeetechInstWrite, params.data(), length + 1)) {
-        return false;
-    }
-
-    // Some Feetech servos/controllers do not ACK write commands depending on
-    // their status-return-level setting. Reads below still verify live comms.
-    drainInput(2);
-    return true;
-}
-
-bool FeetechServoDevice::readRegister(int id, uint8_t address,
-                                      uint8_t* data, std::size_t length) {
-    if (id < 0 || id > 253 || length == 0 || length > 250 || !data) {
-        return false;
-    }
-
-    const uint8_t params[2] = {address, static_cast<uint8_t>(length)};
-    if (!writePacket(static_cast<uint8_t>(id), kFeetechInstRead, params, sizeof(params))) {
-        return false;
-    }
-
-    uint8_t error = 0;
-    return readStatusPacket(static_cast<uint8_t>(id), &error, data, length) && error == 0;
-}
-
-bool FeetechServoDevice::writeRegisterByte(int id, uint8_t address, uint8_t value) {
-    return writeRegister(id, address, &value, 1);
-}
-
-int FeetechServoDevice::readRegisterByte(int id, uint8_t address) {
-    uint8_t value = 0;
-    if (!readRegister(id, address, &value, 1)) {
-        return -1;
-    }
-    return value;
-}
-
-int FeetechServoDevice::readRegisterWord(int id, uint8_t address,
-                                         bool signed_value, uint8_t sign_bit) {
-    uint8_t data[2] = {0, 0};
-    if (!readRegister(id, address, data, sizeof(data))) {
-        return -1;
-    }
-
-    int value = feetech_read_be_u16(data);
-    if (signed_value && (value & (1 << sign_bit))) {
-        value = -(value & ~(1 << sign_bit));
-    }
-    return value;
-}
-
-bool FeetechServoDevice::writePosition(int id, int position, int speed) {
-    uint8_t data[6] = {0, 0, 0, 0, 0, 0};
-    feetech_write_be_u16(data + 0, position);
-    feetech_write_be_u16(data + 2, 0);
-    feetech_write_be_u16(data + 4, speed);
-    return writeRegister(id, kFeetechGoalPositionAddr, data, sizeof(data));
-}
-
-bool FeetechServoDevice::enableTorque(int id, bool enable) {
-    return writeRegisterByte(id, kFeetechTorqueEnableAddr, enable ? 1 : 0);
-}
-
-bool FeetechServoDevice::SetServoId(int old_id, int new_id) {
-    if (!is_open_ || old_id < 0 || old_id > 253 || new_id < 0 || new_id > 253 ||
-        old_id == 254 || new_id == 254) {
-        return false;
-    }
-
-    if (!writeRegisterByte(old_id, kFeetechEepromLockAddr, 0)) {
-        std::cerr << "[Error] Failed to unlock Feetech EEPROM: id=" << old_id << std::endl;
-        return false;
-    }
-
-    if (!writeRegisterByte(old_id, kFeetechServoIdAddr, static_cast<uint8_t>(new_id))) {
-        std::cerr << "[Error] Failed to write Feetech ID: old_id=" << old_id
-                  << ", new_id=" << new_id << std::endl;
-        return false;
-    }
-
-    if (!writeRegisterByte(new_id, kFeetechEepromLockAddr, 1)) {
-        std::cerr << "[Warn] Feetech ID was written, but EEPROM re-lock did not confirm: new_id="
-                  << new_id << std::endl;
-    }
-    return true;
-}
-
-void FeetechServoDevice::EnableMotor(int& motor_index) {
-    if (!is_open_ || !feetech_valid_motor_index(p_motors_data_, motor_index)) return;
-    const auto& info = (*p_motors_data_)[motor_index].info;
-    if (enableTorque(info.canid, true)) {
-        (*p_motors_data_)[motor_index].recv.motor_state = 1;
-    } else {
-        (*p_motors_data_)[motor_index].recv.fault_message = 1;
-    }
-}
-
-void FeetechServoDevice::DisableMotor(int& motor_index) {
-    if (!is_open_ || !feetech_valid_motor_index(p_motors_data_, motor_index)) return;
-    const auto& info = (*p_motors_data_)[motor_index].info;
-    if (enableTorque(info.canid, false)) {
-        (*p_motors_data_)[motor_index].recv.motor_state = 0;
-    } else {
-        (*p_motors_data_)[motor_index].recv.fault_message = 1;
-    }
-}
-
-void FeetechServoDevice::ClearError(int& motor_index) {
-    if (!feetech_valid_motor_index(p_motors_data_, motor_index)) return;
-    (*p_motors_data_)[motor_index].recv.fault_message = 0;
-}
-
-void FeetechServoDevice::SetZero(int& motor_index) {
-    if (!feetech_valid_motor_index(p_motors_data_, motor_index)) return;
-    std::cout << "[Info] Feetech SetZero is software-neutral; keep TOML pos_min/pos_max as travel limits."
-              << std::endl;
-}
-
-void FeetechServoDevice::SetMode(int& motor_index, int mode) {
-    if (!feetech_valid_motor_index(p_motors_data_, motor_index)) return;
-    (*p_motors_data_)[motor_index].send.mode = static_cast<uint8_t>(std::max(0, mode));
-}
-
-void FeetechServoDevice::SendCommand(int& motor_index) {
-    if (!is_open_ || !feetech_valid_motor_index(p_motors_data_, motor_index)) return;
-    auto& motor = (*p_motors_data_)[motor_index];
-    const int id = motor.info.canid;
-    const int position = positionToCount(motor.info, motor.send.position);
-    const int speed = speedToCount(motor.send.speed);
-
-    if (!writePosition(id, position, speed)) {
-        motor.recv.fault_message = 1;
-        std::cerr << "[Warn] Feetech WritePos failed: id=" << id << std::endl;
-    }
-}
-
-void FeetechServoDevice::QueryPos(int& motor_index) {
-    if (!is_open_ || !feetech_valid_motor_index(p_motors_data_, motor_index)) return;
-    auto& motor = (*p_motors_data_)[motor_index];
-    const int id = motor.info.canid;
-
-    const int pos = readRegisterWord(id, kFeetechPresentPositionAddr, false, 0);
-    if (pos >= 0) {
-        motor.recv.current_position_f.store(countToPosition(motor.info, pos));
-        motor.recv.motor_id = static_cast<uint8_t>(id);
-    }
-
-    const int speed = readRegisterWord(id, kFeetechPresentSpeedAddr, true, 15);
-    if (speed != -1) {
-        motor.recv.current_speed_f.store(static_cast<float>(speed) * kFeetechRpmToRadS);
-    }
-
-    const int load = readRegisterWord(id, kFeetechPresentLoadAddr, true, 10);
-    if (load != -1) {
-        motor.recv.current_torque_f.store(static_cast<float>(load) / 1000.0f);
-    }
-
-    const int temp = readRegisterByte(id, kFeetechPresentTemperatureAddr);
-    if (temp != -1) {
-        motor.recv.current_temp_f.store(static_cast<float>(temp));
-    }
-}
-
-void FeetechServoDevice::QueryVersion(int& motor_index) {
-    (void)motor_index;
 }
 
 // =========================================================
@@ -1349,36 +916,6 @@ static inline uint32_t build_hq_can_id(uint8_t motor_id, bool require_reply) {
 
 static bool use_canfd_brs() {
     const char* env = std::getenv("HQ_CANFD_BRS");
-    if (!env) return false;
-    return std::string(env) == "1";
-}
-
-static bool env_bool(const char* key, bool default_val) {
-    const char* env = std::getenv(key);
-    if (!env) return default_val;
-    const std::string v(env);
-    return (v == "1" || v == "true" || v == "TRUE" || v == "on" || v == "ON");
-}
-
-static bool pfl28_use_xyber_mode() {
-    // AgiBot X1 drives L28 through DCU CAN-FD broadcast slots at 1 kHz.
-    return env_bool("PFL28_XYBER_MODE", true);
-}
-
-static bool pfl28_use_canfd_brs() {
-    const char* env = std::getenv("PFL28_CANFD_BRS");
-    if (!env) return pfl28_use_xyber_mode();
-    return env_bool("PFL28_CANFD_BRS", false);
-}
-
-static bool pfl28_use_canfd_frame() {
-    // Official manual specifies CAN FD transport for PowerFlow L28.
-    // Keep CAN FD as default; allow temporary fallback via env for field debugging.
-    return env_bool("PFL28_USE_CANFD", true);
-}
-
-static bool pfl28_allow_neg_current() {
-    const char* env = std::getenv("PFL28_ALLOW_NEG_CURRENT");
     if (!env) return false;
     return std::string(env) == "1";
 }
@@ -1478,9 +1015,7 @@ static bool has_cap_net_admin() {
 
 DeviceX::~DeviceX() {
     is_running = false;
-    // Close socket first to unblock rx thread's blocking read().
-    const int fd = socket_fd;
-    socket_fd = -1;
+    const int fd = socket_fd.exchange(-1);
     if (fd >= 0) {
         close(fd);
     }
@@ -1581,17 +1116,27 @@ bool DeviceX::openSocket(const std::string& iface, bool enable_canfd, int dbitra
     int enable_fd = 1;
     if (setsockopt(socket_fd, SOL_CAN_RAW, CAN_RAW_FD_FRAMES, &enable_fd, sizeof(enable_fd)) < 0) {
         std::perror("setsockopt CAN_RAW_FD_FRAMES");
+        if (enable_canfd) {
+            const int fd = socket_fd.exchange(-1);
+            if (fd >= 0) close(fd);
+            return false;
+        }
     }
 
     return true;
 }
 
 bool DeviceX::Init(const std::string& iface, int dev_idx,
-                   std::vector<Motor_CAN_Struct>* data_ptr, TopoMapper* mapper_ptr) {
+                   std::vector<Motor_CAN_Struct>* data_ptr, MotorMapper* mapper_ptr,
+                   std::mutex* motor_mutex) {
     iface_name = iface;
     device_global_index = dev_idx;
     p_motors_data = data_ptr;
     p_mapper = mapper_ptr;
+    p_motor_mutex = motor_mutex;
+    if (!p_motors_data || !p_mapper || !p_motor_mutex) {
+        return false;
+    }
 
     bool need_canfd = false;
     int dbitrate = 1000000;
@@ -1602,11 +1147,6 @@ bool DeviceX::Init(const std::string& iface, int dev_idx,
             }
             if (motor.info.api_type == 5) {
                 need_canfd = true;
-            } else if (motor.info.api_type == 6) {
-                if (pfl28_use_canfd_frame()) {
-                    need_canfd = true;
-                    dbitrate = 5000000;
-                }
             }
         }
     }
@@ -1684,8 +1224,9 @@ bool DeviceX::sendFrameWithRetry(const void* frame, std::size_t frame_size, cons
         if (err == ENETDOWN) {
             std::cerr << tag << ": Network is down on " << iface_name
                       << ". Closing socket until interface is up." << std::endl;
-            close(socket_fd);
-            socket_fd = -1;
+            is_running = false;
+            const int fd = socket_fd.exchange(-1);
+            if (fd >= 0) close(fd);
             return false;
         }
 
@@ -1745,28 +1286,15 @@ bool DeviceX::sendStandardFrame(uint32_t can_id, const uint8_t* data, uint8_t dl
     return sendFrameWithRetry(&frame, sizeof(frame), "sendStandardFrame");
 }
 
-bool DeviceX::sendStandardFdFrame(uint32_t can_id, const uint8_t* data, uint8_t len, bool brs) {
-    if (socket_fd < 0 || data == nullptr || len > CANFD_MAX_DLEN) return false;
-
-    struct canfd_frame frame {};
-    frame.can_id = (can_id & CAN_SFF_MASK);
-    frame.len = len;
-    frame.flags = brs ? CANFD_BRS : 0;
-    std::memcpy(frame.data, data, len);
-    return sendFrameWithRetry(&frame, sizeof(frame), "sendStandardFdFrame");
-}
-
-bool DeviceX::sendRawFrame(uint8_t chan, uint32_t type, uint16_t data_area, uint8_t motor_id, uint8_t* data) {
-    (void)chan;
-    return sendExtendedFrame(type, data_area, motor_id, data);
-}
-
 // =========================================================
 //  DeviceX public dispatch
 // =========================================================
 
 bool DeviceX::EnableMotor(int& motor_index) {
-    if (!p_motors_data || motor_index < 0 || motor_index >= (int)p_motors_data->size()) return false;
+    if (!p_motors_data || !p_motor_mutex) return false;
+    std::lock_guard<std::mutex> command_lock(command_mutex);
+    std::unique_lock<std::mutex> lock(*p_motor_mutex);
+    if (motor_index < 0 || motor_index >= (int)p_motors_data->size()) return false;
 
     int type = (*p_motors_data)[motor_index].info.api_type;
 
@@ -1774,15 +1302,17 @@ bool DeviceX::EnableMotor(int& motor_index) {
     else if (type == 2) return EnableMotor_Type2(motor_index);
     else if (type == 3) return EnableMotor_Type3(motor_index);
     else if (type == 5) return EnableMotor_Type5(motor_index);
-    else if (type == 6) return EnableMotor_Type6(motor_index);
     else if (type == 7) return EnableMotor_Type7(motor_index);
-    else if (type == 8) return EnableMotor_Type8(motor_index);
-    else if (type == 9) return EnableMotor_Type9(motor_index);
+    else if (type == 8) return EnableMotor_Type8(motor_index, lock);
+    else if (type == 9) return EnableMotor_Type9(motor_index, lock);
     return false;
 }
 
 bool DeviceX::DisableMotor(int& motor_index) {
-    if (!p_motors_data || motor_index < 0 || motor_index >= (int)p_motors_data->size()) return false;
+    if (!p_motors_data || !p_motor_mutex) return false;
+    std::lock_guard<std::mutex> command_lock(command_mutex);
+    std::lock_guard<std::mutex> lock(*p_motor_mutex);
+    if (motor_index < 0 || motor_index >= (int)p_motors_data->size()) return false;
 
     int type = (*p_motors_data)[motor_index].info.api_type;
 
@@ -1790,53 +1320,61 @@ bool DeviceX::DisableMotor(int& motor_index) {
     else if (type == 2) return DisableMotor_Type2(motor_index);
     else if (type == 3) return DisableMotor_Type3(motor_index);
     else if (type == 5) return DisableMotor_Type5(motor_index);
-    else if (type == 6) return DisableMotor_Type6(motor_index);
     else if (type == 7) return DisableMotor_Type7(motor_index);
     else if (type == 8) return DisableMotor_Type8(motor_index);
     else if (type == 9) return DisableMotor_Type9(motor_index);
     return false;
 }
 
-void DeviceX::ClearError(int& motor_index) {
-    if (!p_motors_data || motor_index < 0 || motor_index >= (int)p_motors_data->size()) return;
+bool DeviceX::ClearError(int& motor_index) {
+    if (!p_motors_data || !p_motor_mutex) return false;
+    std::lock_guard<std::mutex> command_lock(command_mutex);
+    std::unique_lock<std::mutex> lock(*p_motor_mutex);
+    if (motor_index < 0 || motor_index >= (int)p_motors_data->size()) return false;
 
     int type = (*p_motors_data)[motor_index].info.api_type;
 
-    if (type == 1) ClearError_Type1(motor_index);
-    else if (type == 2) ClearError_Type2(motor_index);
-    else if (type == 3) ClearError_Type3(motor_index);
-    else if (type == 5) ClearError_Type5(motor_index);
-    else if (type == 6) ClearError_Type6(motor_index);
-    else if (type == 7) ClearError_Type7(motor_index);
-    else if (type == 8) ClearError_Type8(motor_index);
-    else if (type == 9) ClearError_Type9(motor_index);
+    if (type == 1) return ClearError_Type1(motor_index);
+    else if (type == 2) return ClearError_Type2(motor_index);
+    else if (type == 3) return ClearError_Type3(motor_index);
+    else if (type == 5) return ClearError_Type5(motor_index, lock);
+    else if (type == 7) return ClearError_Type7(motor_index);
+    else if (type == 8) return ClearError_Type8(motor_index, lock);
+    else if (type == 9) return ClearError_Type9(motor_index);
+    return false;
 }
 
-void DeviceX::SetZero(int& motor_index) {
-    if (!p_motors_data || motor_index < 0 || motor_index >= (int)p_motors_data->size()) return;
+bool DeviceX::SetZero(int& motor_index) {
+    if (!p_motors_data || !p_motor_mutex) return false;
+    std::lock_guard<std::mutex> command_lock(command_mutex);
+    std::unique_lock<std::mutex> lock(*p_motor_mutex);
+    if (motor_index < 0 || motor_index >= (int)p_motors_data->size()) return false;
 
     int type = (*p_motors_data)[motor_index].info.api_type;
 
-    if (type == 1) SetZero_Type1(motor_index);
-    else if (type == 2) SetZero_Type2(motor_index);
-    else if (type == 3) SetZero_Type3(motor_index);
-    else if (type == 5) SetZero_Type5(motor_index);
-    else if (type == 6) SetZero_Type6(motor_index);
-    else if (type == 7) SetZero_Type7(motor_index);
-    else if (type == 8) SetZero_Type8(motor_index);
-    else if (type == 9) SetZero_Type9(motor_index);
+    if (type == 1) return SetZero_Type1(motor_index, lock);
+    else if (type == 2) return SetZero_Type2(motor_index);
+    else if (type == 3) return SetZero_Type3(motor_index);
+    else if (type == 5) return SetZero_Type5(motor_index);
+    else if (type == 7) return SetZero_Type7(motor_index);
+    else if (type == 8) return SetZero_Type8(motor_index, lock);
+    else if (type == 9) return SetZero_Type9(motor_index);
+    return false;
 }
 
 bool DeviceX::SetMode(int& motor_index, int mode) {
-    if (!p_motors_data || motor_index < 0 || motor_index >= (int)p_motors_data->size()) return false;
+    if (!p_motors_data || !p_motor_mutex) return false;
+    std::lock_guard<std::mutex> command_lock(command_mutex);
+    std::lock_guard<std::mutex> lock(*p_motor_mutex);
+    if (motor_index < 0 || motor_index >= (int)p_motors_data->size()) return false;
 
     int type = (*p_motors_data)[motor_index].info.api_type;
+    if (!motor_mode_supported(type, mode)) return false;
 
     if (type == 1) return SetMode_Type1(motor_index, mode);
     else if (type == 2) return SetMode_Type2(motor_index, mode);
     else if (type == 3) return SetMode_Type3(motor_index, mode);
     else if (type == 5) return SetMode_Type5(motor_index, mode);
-    else if (type == 6) return SetMode_Type6(motor_index, mode);
     else if (type == 7) return SetMode_Type7(motor_index, mode);
     else if (type == 8) return SetMode_Type8(motor_index, mode);
     else if (type == 9) return SetMode_Type9(motor_index, mode);
@@ -1844,7 +1382,10 @@ bool DeviceX::SetMode(int& motor_index, int mode) {
 }
 
 bool DeviceX::SendCommand(int& motor_index) {
-    if (!p_motors_data || motor_index < 0 || motor_index >= (int)p_motors_data->size()) {
+    if (!p_motors_data || !p_motor_mutex) return false;
+    std::lock_guard<std::mutex> command_lock(command_mutex);
+    std::unique_lock<std::mutex> lock(*p_motor_mutex);
+    if (motor_index < 0 || motor_index >= (int)p_motors_data->size()) {
         std::cerr << "[ERROR] SendCommand Failed! Index Out of Range or Null Ptr." << std::endl;
         return false;
     }
@@ -1855,15 +1396,17 @@ bool DeviceX::SendCommand(int& motor_index) {
     else if (type == 2) return SendCommand_Type2(motor_index);
     else if (type == 3) return SendCommand_Type3(motor_index);
     else if (type == 5) return SendCommand_Type5(motor_index);
-    else if (type == 6) return SendCommand_Type6(motor_index);
     else if (type == 7) return SendCommand_Type7(motor_index);
     else if (type == 8) return SendCommand_Type8(motor_index);
-    else if (type == 9) return SendCommand_Type9(motor_index);
+    else if (type == 9) return SendCommand_Type9(motor_index, lock);
     return false;
 }
 
 bool DeviceX::QueryPos(int& motor_index) {
-    if (!p_motors_data || motor_index < 0 || motor_index >= (int)p_motors_data->size()) return false;
+    if (!p_motors_data || !p_motor_mutex) return false;
+    std::lock_guard<std::mutex> command_lock(command_mutex);
+    std::unique_lock<std::mutex> lock(*p_motor_mutex);
+    if (motor_index < 0 || motor_index >= (int)p_motors_data->size()) return false;
 
     int type = (*p_motors_data)[motor_index].info.api_type;
 
@@ -1871,18 +1414,20 @@ bool DeviceX::QueryPos(int& motor_index) {
     else if (type == 2) return QueryPos_Type2(motor_index);
     else if (type == 3) return QueryPos_Type3(motor_index);
     else if (type == 5) return QueryPos_Type5(motor_index);
-    else if (type == 6) return QueryPos_Type6(motor_index);
     else if (type == 7) return QueryPos_Type7(motor_index);
-    else if (type == 8) return QueryPos_Type8(motor_index);
+    else if (type == 8) return QueryPos_Type8(motor_index, lock);
     else if (type == 9) return QueryPos_Type9(motor_index);
     return false;
 }
 
-void DeviceX::QueryVersion(int& motor_index) {
-    if (!p_motors_data || motor_index < 0 || motor_index >= (int)p_motors_data->size()) return;
+bool DeviceX::QueryVersion(int& motor_index) {
+    if (!p_motors_data || !p_motor_mutex) return false;
+    std::lock_guard<std::mutex> command_lock(command_mutex);
+    std::lock_guard<std::mutex> lock(*p_motor_mutex);
+    if (motor_index < 0 || motor_index >= (int)p_motors_data->size()) return false;
 
     int type = (*p_motors_data)[motor_index].info.api_type;
-    if (type == 7) QueryVersion_Type7(motor_index);
+    return type == 7 && QueryVersion_Type7(motor_index);
 }
 
 // =========================================================
@@ -1901,14 +1446,14 @@ bool DeviceX::DisableMotor_Type1(int& motor_index) {
     return sendExtendedFrame(4, 0xFD, info.canid, data);
 }
 
-void DeviceX::ClearError_Type1(int& motor_index) {
+bool DeviceX::ClearError_Type1(int& motor_index) {
     const auto& info = (*p_motors_data)[motor_index].info;
     uint8_t data[8] = {0};
     data[0] = 1;
-    sendExtendedFrame(4, 0xFD, info.canid, data);
+    return sendExtendedFrame(4, 0xFD, info.canid, data);
 }
 
-void DeviceX::SetZero_Type1(int& motor_index) {
+bool DeviceX::SetZero_Type1(int& motor_index, std::unique_lock<std::mutex>& lock) {
     // 灵足协议:
     // 1) 通信类型=6, Byte0=1: 设置当前位置为机械零位（RAM 生效）
     // 2) 通信类型=22: 电机数据保存帧（写入掉电保持）
@@ -1917,22 +1462,23 @@ void DeviceX::SetZero_Type1(int& motor_index) {
 
     // Step1: set zero
     data[0] = 1;
-    sendExtendedFrame(6, 0xFD, info.canid, data);
-    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    bool ok = sendExtendedFrame(6, 0xFD, info.canid, data);
+    sleep_without_motor_lock(lock, std::chrono::milliseconds(30));
 
     // Step2: save parameters to non-volatile storage
     std::memset(data, 0, sizeof(data));
-    sendExtendedFrame(22, 0xFD, info.canid, data);
-    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    ok = sendExtendedFrame(22, 0xFD, info.canid, data) && ok;
+    sleep_without_motor_lock(lock, std::chrono::milliseconds(30));
     // Some controllers may drop the first save frame under bus load.
-    sendExtendedFrame(22, 0xFD, info.canid, data);
+    return sendExtendedFrame(22, 0xFD, info.canid, data) && ok;
 }
 
 bool DeviceX::SetMode_Type1(int& motor_index, int mode) {
     auto& motor = (*p_motors_data)[motor_index];
     const auto& info = motor.info;
-    if (mode < 0) mode = 0;
-    if (mode > 3) mode = 3;
+    if (mode != 0 && mode != 2) {
+        return false;
+    }
     motor.send.mode = static_cast<uint8_t>(mode);
 
     uint8_t data[8] = {0};
@@ -1961,9 +1507,12 @@ bool DeviceX::SendCommand_Type1(int& motor_index) {
 
         float limit_cur = std::fabs(cmd.torque);
         if (!std::isfinite(limit_cur) || limit_cur <= 1e-6f) {
-            limit_cur = (info.t_max > 0.0f) ? info.t_max : 43.0f;
+            return false;
         }
-        limit_cur = std::max(0.0f, std::min(43.0f, limit_cur));
+        if (!(info.current_max > 0.0f)) {
+            return false;
+        }
+        limit_cur = std::min(info.current_max, limit_cur);
 
         const bool limit_ok = writeType1Param(static_cast<uint8_t>(info.canid), 0x7018, limit_cur);
         const bool speed_ok = writeType1Param(static_cast<uint8_t>(info.canid), 0x700A, speed);
@@ -2018,12 +1567,13 @@ bool DeviceX::DisableMotor_Type2(int& motor_index) {
     return sendStandardFrame(0x140 + motor.info.canid, data);
 }
 
-void DeviceX::ClearError_Type2(int& motor_index) {
-    DisableMotor_Type2(motor_index);
+bool DeviceX::ClearError_Type2(int& motor_index) {
+    return DisableMotor_Type2(motor_index);
 }
 
-void DeviceX::SetZero_Type2(int& motor_index) {
+bool DeviceX::SetZero_Type2(int& motor_index) {
     (void)motor_index;
+    return false;
 }
 
 bool DeviceX::SetMode_Type2(int& motor_index, int mode) {
@@ -2049,10 +1599,9 @@ bool DeviceX::SendCommand_Type2(int& motor_index) {
         float t_ff = motor.send.torque;
 
         float iq_f = kp * (target_p - current_p) + kd * (target_v - current_v) + t_ff;
-        int16_t iqControl = static_cast<int16_t>(iq_f * LK_CURRENT_SEND_FACTOR);
-
-        if (iqControl > 2048) iqControl = 2048;
-        if (iqControl < -2048) iqControl = -2048;
+        const float iq_scaled = std::clamp(
+            iq_f * LK_CURRENT_SEND_FACTOR, -2048.0f, 2048.0f);
+        const int16_t iqControl = static_cast<int16_t>(std::lround(iq_scaled));
 
         data[0] = 0xA1;
         std::memcpy(&data[4], &iqControl, 2);
@@ -2110,7 +1659,7 @@ bool DeviceX::DisableMotor_Type3(int& motor_index) {
     return sendStandardFrame(can_id, data);
 }
 
-void DeviceX::ClearError_Type3(int& motor_index) {
+bool DeviceX::ClearError_Type3(int& motor_index) {
     const auto& motor = (*p_motors_data)[motor_index];
 
     uint16_t canid = static_cast<uint16_t>(motor.info.canid);
@@ -2118,10 +1667,10 @@ void DeviceX::ClearError_Type3(int& motor_index) {
     uint32_t can_id = (mode == 1) ? (0x100 + canid) : ((mode == 2) ? (0x200 + canid) : canid);
 
     uint8_t data[8] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFB};
-    sendStandardFrame(can_id, data);
+    return sendStandardFrame(can_id, data);
 }
 
-void DeviceX::SetZero_Type3(int& motor_index) {
+bool DeviceX::SetZero_Type3(int& motor_index) {
     const auto& motor = (*p_motors_data)[motor_index];
 
     uint16_t canid = static_cast<uint16_t>(motor.info.canid);
@@ -2129,12 +1678,10 @@ void DeviceX::SetZero_Type3(int& motor_index) {
     uint32_t can_id = (mode == 1) ? (0x100 + canid) : ((mode == 2) ? (0x200 + canid) : canid);
 
     uint8_t data[8] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE};
-    sendStandardFrame(can_id, data);
+    return sendStandardFrame(can_id, data);
 }
 
 bool DeviceX::SetMode_Type3(int& motor_index, int mode) {
-    if (mode < 0) mode = 0;
-    if (mode > 3) mode = 3;
     (*p_motors_data)[motor_index].send.mode = static_cast<uint8_t>(mode);
     return true;
 }
@@ -2216,19 +1763,19 @@ bool DeviceX::DisableMotor_Type5(int& motor_index) {
     return sendExtendedIdFrame(can_id, tdata, sizeof(tdata));
 }
 
-void DeviceX::ClearError_Type5(int& motor_index) {
+bool DeviceX::ClearError_Type5(int& motor_index, std::unique_lock<std::mutex>& lock) {
     const auto& info = (*p_motors_data)[motor_index].info;
     const uint32_t can_id = build_hq_can_id(static_cast<uint8_t>(info.canid), HQ_REPLY_REQUIRED);
     // ref/livelybot_fdcan.c: set_motor_reset_int8()
     const uint8_t reset_cmd[] = {
         0x40, 0x01, 0x08, 0x64, 0x20, 0x72, 0x65, 0x73, 0x65, 0x74, 0x0A, 0x50
     };
-    sendExtendedIdFdFrame(can_id, reset_cmd, sizeof(reset_cmd));
-    std::this_thread::sleep_for(std::chrono::milliseconds(80));
-    QueryPos_Type5(motor_index);
+    const bool reset_ok = sendExtendedIdFdFrame(can_id, reset_cmd, sizeof(reset_cmd));
+    sleep_without_motor_lock(lock, std::chrono::milliseconds(80));
+    return QueryPos_Type5(motor_index) && reset_ok;
 }
 
-void DeviceX::SetZero_Type5(int& motor_index) {
+bool DeviceX::SetZero_Type5(int& motor_index) {
     const auto& info = (*p_motors_data)[motor_index].info;
     const uint32_t can_id = build_hq_can_id(static_cast<uint8_t>(info.canid), HQ_REPLY_REQUIRED);
 
@@ -2238,19 +1785,17 @@ void DeviceX::SetZero_Type5(int& motor_index) {
         0x2D, 0x73, 0x65, 0x74, 0x2D, 0x6F, 0x75, 0x74,
         0x70, 0x75, 0x74, 0x20, 0x30, 0x2E, 0x30, 0x0A
     };
-    sendExtendedIdFdFrame(can_id, rezero_cmd, sizeof(rezero_cmd));
+    const bool rezero_ok = sendExtendedIdFdFrame(can_id, rezero_cmd, sizeof(rezero_cmd));
 
     // ref/livelybot_fdcan.c: set_conf_write()
     const uint8_t conf_write_cmd[] = {
         0x40, 0x01, 0x0B, 0x63, 0x6F, 0x6E, 0x66, 0x20,
         0x77, 0x72, 0x69, 0x74, 0x65, 0x0A, 0x50, 0x50
     };
-    sendExtendedIdFdFrame(can_id, conf_write_cmd, sizeof(conf_write_cmd));
+    return sendExtendedIdFdFrame(can_id, conf_write_cmd, sizeof(conf_write_cmd)) && rezero_ok;
 }
 
 bool DeviceX::SetMode_Type5(int& motor_index, int mode) {
-    if (mode < 0) mode = 0;
-    if (mode > 3) mode = 3;
     (*p_motors_data)[motor_index].send.mode = static_cast<uint8_t>(mode);
     return true;
 }
@@ -2363,142 +1908,6 @@ bool DeviceX::QueryPos_Type5(int& motor_index) {
 }
 
 // =========================================================
-//  Type 6 (AgiBot PowerFlow L28/PFL28)
-// =========================================================
-
-bool DeviceX::EnableMotor_Type6(int& motor_index) {
-    // PFL28 powers up in enabled state.
-    (void)motor_index;
-    return true;
-}
-
-bool DeviceX::DisableMotor_Type6(int& motor_index) {
-    // No dedicated disable command in PFL28 public protocol.
-    // Send a zero-current hold at the latest known position as a safe fallback.
-    if (!p_motors_data) return false;
-    auto& motor = (*p_motors_data)[motor_index];
-    motor.send.position = motor.recv.current_position_f.load();
-    motor.send.torque = 0.0f;
-    return SendCommand_Type6(motor_index);
-}
-
-void DeviceX::ClearError_Type6(int& motor_index) {
-    // No clear-error frame is documented for PFL28.
-    (void)motor_index;
-}
-
-void DeviceX::SetZero_Type6(int& motor_index) {
-    // No set-zero frame is documented for PFL28.
-    (void)motor_index;
-}
-
-bool DeviceX::SetMode_Type6(int& motor_index, int mode) {
-    // PFL28 uses position/current command frame; keep mode for compatibility.
-    (*p_motors_data)[motor_index].send.mode = static_cast<uint8_t>(mode);
-    return true;
-}
-
-bool DeviceX::SendCommand_Type6(int& motor_index) {
-    const auto& motor = (*p_motors_data)[motor_index];
-    const auto& info = motor.info;
-
-    if (pfl28_use_canfd_frame() && pfl28_use_xyber_mode() && info.canid >= 1 && info.canid <= 8) {
-        return SendCommand_Type6_XyberBroadcast(motor_index);
-    }
-
-    const float pos_min = (info.p_max > info.p_min) ? info.p_min : 0.0f;
-    const float pos_max = (info.p_max > info.p_min) ? info.p_max : 9.5f;
-    const float cur_max = (info.t_max > info.t_min) ? info.t_max : 2.5f;
-    float cur_min = (info.t_max > info.t_min) ? info.t_min : 0.0f;
-    if (pfl28_allow_neg_current() && cur_min >= 0.0f) {
-        cur_min = -cur_max;
-    }
-
-    float pos_cmd = motor.send.position;
-    float cur_cmd = motor.send.torque;
-
-    if (!std::isfinite(pos_cmd)) pos_cmd = 0.0f;
-    if (!std::isfinite(cur_cmd)) cur_cmd = 0.0f;
-
-    pos_cmd = std::max(pos_min, std::min(pos_max, pos_cmd));
-    cur_cmd = std::max(cur_min, std::min(cur_max, cur_cmd));
-
-    if (!pfl28_use_canfd_frame()) {
-        std::cerr << "[Error] PFL28 point-to-point protocol requires CAN FD." << std::endl;
-        return false;
-    }
-
-    uint8_t data[8] = {0};
-    std::memcpy(&data[0], &pos_cmd, sizeof(float));
-    std::memcpy(&data[4], &cur_cmd, sizeof(float));
-    return sendStandardFdFrame(static_cast<uint32_t>(info.canid), data, sizeof(data), pfl28_use_canfd_brs());
-}
-
-namespace {
-
-void appendPfl28XyberSlot(
-    const Motor_CAN_Struct& motor,
-    uint8_t* data,
-    bool allow_neg_i) {
-    const auto& info = motor.info;
-    const float pos_min = (info.p_max > info.p_min) ? info.p_min : 0.0f;
-    const float pos_max = (info.p_max > info.p_min) ? info.p_max : 9.5f;
-    const float cur_max = (info.t_max > info.t_min) ? info.t_max : 2.5f;
-    float cur_min = (info.t_max > info.t_min) ? info.t_min : 0.0f;
-    if (allow_neg_i && cur_min >= 0.0f) {
-        cur_min = -cur_max;
-    }
-
-    float pos_cmd = motor.send.position;
-    float cur_cmd = motor.send.torque;
-    if (!std::isfinite(pos_cmd)) pos_cmd = 0.0f;
-    if (!std::isfinite(cur_cmd)) cur_cmd = 0.0f;
-    pos_cmd = std::max(pos_min, std::min(pos_max, pos_cmd));
-    cur_cmd = std::max(cur_min, std::min(cur_max, cur_cmd));
-
-    const std::size_t offset = static_cast<std::size_t>(info.canid - 1) * 8U;
-    std::memcpy(&data[offset], &pos_cmd, sizeof(float));
-    std::memcpy(&data[offset + 4], &cur_cmd, sizeof(float));
-}
-
-}  // namespace
-
-bool DeviceX::SendCommand_Type6_XyberBroadcast(int& motor_index) {
-    if (!p_motors_data || motor_index < 0 ||
-        motor_index >= static_cast<int>(p_motors_data->size())) {
-        return false;
-    }
-
-    const auto& motor = (*p_motors_data)[motor_index];
-    const auto& info = motor.info;
-    uint8_t data[64] = {0};
-    const bool allow_neg_i = pfl28_allow_neg_current();
-    bool has_slot = false;
-
-    for (const auto& other : *p_motors_data) {
-        if (other.info.api_type == 6 &&
-            other.info.device_index == info.device_index &&
-            other.info.canid >= 1 &&
-            other.info.canid <= 8) {
-            appendPfl28XyberSlot(other, data, allow_neg_i);
-            has_slot = true;
-        }
-    }
-
-    if (!has_slot) {
-        return false;
-    }
-    return sendStandardFdFrame(0, data, sizeof(data), pfl28_use_canfd_brs());
-}
-
-bool DeviceX::QueryPos_Type6(int& motor_index) {
-    // PFL28 returns state after each control frame; no standalone query frame documented.
-    // We keep this as no-op to avoid accidental motion during status polling loops.
-    (void)motor_index;
-    return true;
-}
-
-// =========================================================
 //  Type 7 (Haitai/海泰)
 // =========================================================
 
@@ -2515,28 +1924,29 @@ bool DeviceX::DisableMotor_Type7(int& motor_index) {
     return sendStandardFrame(frame.can_id, frame.data.data(), frame.dlc);
 }
 
-void DeviceX::ClearError_Type7(int& motor_index) {
+bool DeviceX::ClearError_Type7(int& motor_index) {
     const auto& info = (*p_motors_data)[motor_index].info;
     const HaitaiCommandFrame frame = make_haitai_simple_query(0xAF, static_cast<uint32_t>(info.canid));
-    sendStandardFrame(frame.can_id, frame.data.data(), frame.dlc);
+    return sendStandardFrame(frame.can_id, frame.data.data(), frame.dlc);
 }
 
-void DeviceX::SetZero_Type7(int& motor_index) {
+bool DeviceX::SetZero_Type7(int& motor_index) {
     const auto& info = (*p_motors_data)[motor_index].info;
     const HaitaiCommandFrame frame = make_haitai_simple_query(0xB1, static_cast<uint32_t>(info.canid));
-    sendStandardFrame(frame.can_id, frame.data.data(), frame.dlc);
+    return sendStandardFrame(frame.can_id, frame.data.data(), frame.dlc);
 }
 
 bool DeviceX::SetMode_Type7(int& motor_index, int mode) {
-    if (mode < 0) mode = 0;
-    if (mode > 4) mode = 4;
     auto& motor = (*p_motors_data)[motor_index];
     motor.send.mode = static_cast<uint8_t>(mode);
     return true;
 }
 
 bool DeviceX::ConfigureHaitaiMitLimits(int& motor_index) {
-    if (!p_motors_data || motor_index < 0 ||
+    if (!p_motors_data || !p_motor_mutex) return false;
+    std::lock_guard<std::mutex> command_lock(command_mutex);
+    std::lock_guard<std::mutex> lock(*p_motor_mutex);
+    if (motor_index < 0 ||
         static_cast<std::size_t>(motor_index) >= p_motors_data->size()) {
         return false;
     }
@@ -2560,28 +1970,36 @@ bool DeviceX::ConfigureHaitaiMitLimits(int& motor_index) {
 }
 
 bool DeviceX::SendCommand_Type7(int& motor_index) {
-    const auto& motor = (*p_motors_data)[motor_index];
+    auto& motor = (*p_motors_data)[motor_index];
     const auto& info = motor.info;
     const auto& cmd = motor.send;
 
     HaitaiCommandFrame frame {};
+    if (cmd.mode == 1 && !(info.current_min < info.current_max)) {
+        return false;
+    }
     if (cmd.mode == 4) {
-        const auto& recv = motor.recv;
-        const float pos_max = recv.haitai_mit_limits_valid ? recv.haitai_mit_pos_max_rad :
-            ((info.p_max > 0.0f) ? info.p_max : HAITAI_MIT_DEFAULT_POS_MAX_RAD);
-        const float vel_max = recv.haitai_mit_limits_valid ? recv.haitai_mit_vel_max_rad_s :
-            ((info.v_max > 0.0f) ? info.v_max : HAITAI_MIT_DEFAULT_VEL_MAX_RAD_S);
-        const float torque_max = recv.haitai_mit_limits_valid ? recv.haitai_mit_torque_max_nm :
-            ((info.t_max > 0.0f) ? info.t_max : HAITAI_MIT_DEFAULT_TORQUE_MAX_NM);
+        auto& recv = motor.recv;
+        if (!recv.haitai_mit_limits_valid) {
+            const uint64_t now_ns = steady_time_ns();
+            if (recv.last_mit_limits_query_ns == 0 ||
+                now_ns - recv.last_mit_limits_query_ns >= 1000000000ULL) {
+                recv.last_mit_limits_query_ns = now_ns;
+                const HaitaiCommandFrame query = make_haitai_simple_query(
+                    0xF0, static_cast<uint32_t>(info.canid));
+                (void)sendStandardFrame(query.can_id, query.data.data(), query.dlc);
+            }
+            return false;
+        }
         frame = build_haitai_mit_command(
             cmd.position,
             cmd.speed,
             cmd.kp,
             cmd.kd,
             cmd.torque,
-            pos_max,
-            vel_max,
-            torque_max,
+            recv.haitai_mit_pos_max_rad,
+            recv.haitai_mit_vel_max_rad_s,
+            recv.haitai_mit_torque_max_nm,
             static_cast<uint32_t>(info.canid));
     } else {
         frame = build_haitai_command(
@@ -2604,77 +2022,92 @@ bool DeviceX::QueryPos_Type7(int& motor_index) {
         return sendStandardFrame(frame.can_id, frame.data.data(), frame.dlc);
     };
 
+    const uint64_t now_ns = steady_time_ns();
+    if (motor.send.mode == 4) {
+        if (!motor.recv.haitai_mit_limits_valid) {
+            if (motor.recv.last_mit_limits_query_ns == 0 ||
+                now_ns - motor.recv.last_mit_limits_query_ns >= 1000000000ULL) {
+                motor.recv.last_mit_limits_query_ns = now_ns;
+                return send_query(0xF0);
+            }
+            return true;
+        }
+        return send_query(0xF1);
+    }
+
     if (!motor.recv.version_valid) {
-        bool ok = send_query(0xA0);
-        std::this_thread::sleep_for(std::chrono::microseconds(100));
-        ok = send_query(0xA4) && ok;
-        std::this_thread::sleep_for(std::chrono::microseconds(100));
-        ok = send_query(0xA3) && ok;
-        std::this_thread::sleep_for(std::chrono::microseconds(100));
-        ok = send_query(0xA2) && ok;
-        std::this_thread::sleep_for(std::chrono::microseconds(100));
-        ok = send_query(0xA1) && ok;
-        return ok;
+        bool ok = true;
+        if (motor.recv.last_version_query_ns == 0 ||
+            now_ns - motor.recv.last_version_query_ns >= 1000000000ULL) {
+            motor.recv.last_version_query_ns = now_ns;
+            ok = send_query(0xA0);
+        }
+        return send_query(0xA4) && ok;
     }
 
     if (motor.recv.can_proto_version < 7) {
-        bool ok = send_query(0xA3);
-        std::this_thread::sleep_for(std::chrono::microseconds(100));
-        ok = send_query(0xA2) && ok;
-        std::this_thread::sleep_for(std::chrono::microseconds(100));
-        ok = send_query(0xA1) && ok;
-        return ok;
+        static constexpr uint8_t queries[] = {0xA1, 0xA2, 0xA3};
+        return send_query(queries[motor.recv.poll_sequence++ % 3]);
     }
 
-    return send_query(0xA4);
+    static constexpr uint8_t queries[] = {0xA4, 0xA3};
+    return send_query(queries[motor.recv.poll_sequence++ % 2]);
 }
 
-void DeviceX::QueryVersion_Type7(int& motor_index) {
+bool DeviceX::QueryVersion_Type7(int& motor_index) {
     const auto& info = (*p_motors_data)[motor_index].info;
     const HaitaiCommandFrame frame = make_haitai_simple_query(0xA0, static_cast<uint32_t>(info.canid));
-    sendStandardFrame(frame.can_id, frame.data.data(), frame.dlc);
+    return sendStandardFrame(frame.can_id, frame.data.data(), frame.dlc);
 }
 
 // =========================================================
 //  Type 8 (ENCOS EC-A series)
 // =========================================================
 
-bool DeviceX::EnableMotor_Type8(int& motor_index) {
-    const auto& info = (*p_motors_data)[motor_index].info;
+bool DeviceX::EnableMotor_Type8(int& motor_index, std::unique_lock<std::mutex>& lock) {
+    auto& motor = (*p_motors_data)[motor_index];
+    const auto& info = motor.info;
     const encos::CommandFrame release =
         encos::make_brake_release_command(static_cast<uint32_t>(info.canid));
     const bool release_ok = sendStandardFrame(release.can_id, release.data.data(), release.dlc);
-    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    sleep_without_motor_lock(lock, std::chrono::milliseconds(2));
     const encos::CommandFrame current_zero =
         encos::make_current_zero_command(static_cast<uint32_t>(info.canid));
     const bool zero_ok = sendStandardFrame(current_zero.can_id, current_zero.data.data(), current_zero.dlc);
+    if (release_ok && zero_ok) {
+        motor.recv.motor_state = 1;
+    }
     return release_ok && zero_ok;
 }
 
 bool DeviceX::DisableMotor_Type8(int& motor_index) {
-    const auto& info = (*p_motors_data)[motor_index].info;
+    auto& motor = (*p_motors_data)[motor_index];
+    const auto& info = motor.info;
     const encos::CommandFrame frame =
         encos::make_damping_command(static_cast<uint32_t>(info.canid));
-    return sendStandardFrame(frame.can_id, frame.data.data(), frame.dlc);
+    const bool sent = sendStandardFrame(frame.can_id, frame.data.data(), frame.dlc);
+    if (sent) {
+        motor.recv.motor_state = 0;
+    }
+    return sent;
 }
 
-void DeviceX::ClearError_Type8(int& motor_index) {
-    DisableMotor_Type8(motor_index);
-    std::this_thread::sleep_for(std::chrono::milliseconds(2));
-    QueryPos_Type8(motor_index);
+bool DeviceX::ClearError_Type8(int& motor_index, std::unique_lock<std::mutex>& lock) {
+    const bool disable_ok = DisableMotor_Type8(motor_index);
+    sleep_without_motor_lock(lock, std::chrono::milliseconds(2));
+    return QueryPos_Type8(motor_index, lock) && disable_ok;
 }
 
-void DeviceX::SetZero_Type8(int& motor_index) {
+bool DeviceX::SetZero_Type8(int& motor_index, std::unique_lock<std::mutex>& lock) {
     const auto& info = (*p_motors_data)[motor_index].info;
     const encos::CommandFrame frame =
         encos::make_set_zero_command(static_cast<uint32_t>(info.canid));
-    sendStandardFrame(frame.can_id, frame.data.data(), frame.dlc);
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    const bool ok = sendStandardFrame(frame.can_id, frame.data.data(), frame.dlc);
+    sleep_without_motor_lock(lock, std::chrono::milliseconds(500));
+    return ok;
 }
 
 bool DeviceX::SetMode_Type8(int& motor_index, int mode) {
-    if (mode < 0) mode = 0;
-    if (mode > 3) mode = 3;
     (*p_motors_data)[motor_index].send.mode = static_cast<uint8_t>(mode);
     return true;
 }
@@ -2691,9 +2124,15 @@ bool DeviceX::SendCommand_Type8(int& motor_index) {
         frame = encos::make_mit_command(
             can_id, limits, cmd.position, cmd.speed, cmd.kp, cmd.kd, cmd.torque);
     } else if (cmd.mode == 1) {
+        if (!(info.current_min < info.current_max)) {
+            return false;
+        }
         frame = encos::make_position_command(
             can_id, cmd.position, cmd.speed, cmd.torque);
     } else if (cmd.mode == 2) {
+        if (!(info.current_min < info.current_max)) {
+            return false;
+        }
         frame = encos::make_speed_command(
             can_id, cmd.speed, cmd.torque);
     } else {
@@ -2703,12 +2142,12 @@ bool DeviceX::SendCommand_Type8(int& motor_index) {
     return sendStandardFrame(frame.can_id, frame.data.data(), frame.dlc);
 }
 
-bool DeviceX::QueryPos_Type8(int& motor_index) {
+bool DeviceX::QueryPos_Type8(int& motor_index, std::unique_lock<std::mutex>& lock) {
     const auto& info = (*p_motors_data)[motor_index].info;
     const uint32_t can_id = static_cast<uint32_t>(info.canid);
     const encos::CommandFrame pos_query = encos::make_query_command(can_id, 1);
     const bool pos_ok = sendStandardFrame(pos_query.can_id, pos_query.data.data(), pos_query.dlc);
-    std::this_thread::sleep_for(std::chrono::microseconds(100));
+    sleep_without_motor_lock(lock, std::chrono::microseconds(100));
     const encos::CommandFrame speed_query = encos::make_query_command(can_id, 2);
     const bool speed_ok = sendStandardFrame(speed_query.can_id, speed_query.data.data(), speed_query.dlc);
     return pos_ok && speed_ok;
@@ -2718,7 +2157,7 @@ bool DeviceX::QueryPos_Type8(int& motor_index) {
 //  Type 9 (JC CAN servo)
 // =========================================================
 
-bool DeviceX::EnableMotor_Type9(int& motor_index) {
+bool DeviceX::EnableMotor_Type9(int& motor_index, std::unique_lock<std::mutex>& lock) {
     auto& motor = (*p_motors_data)[motor_index];
     const auto& info = motor.info;
     uint8_t data[8] = {0};
@@ -2727,7 +2166,7 @@ bool DeviceX::EnableMotor_Type9(int& motor_index) {
     motor.send.mode = mode;
     make_jc_write16(data, 0x0060, mode);
     const bool mode_sent = sendStandardFrame(0x600U + static_cast<uint32_t>(info.canid), data, sizeof(data));
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    sleep_without_motor_lock(lock, std::chrono::milliseconds(5));
 
     make_jc_write16(data, 0x00A2, 1);
     const bool enable_sent = sendStandardFrame(0x600U + static_cast<uint32_t>(info.canid), data, sizeof(data));
@@ -2750,28 +2189,24 @@ bool DeviceX::DisableMotor_Type9(int& motor_index) {
     return sent;
 }
 
-void DeviceX::ClearError_Type9(int& motor_index) {
-    auto& motor = (*p_motors_data)[motor_index];
-    const auto& info = motor.info;
+bool DeviceX::ClearError_Type9(int& motor_index) {
+    const auto& info = (*p_motors_data)[motor_index].info;
     uint8_t data[8] = {0};
 
     make_jc_read32(data, 0x000C);
-    sendStandardFrame(0x600U + static_cast<uint32_t>(info.canid), data, sizeof(data));
-    motor.recv.fault_message = 0;
+    (void)sendStandardFrame(0x600U + static_cast<uint32_t>(info.canid), data, sizeof(data));
+    return false;
 }
 
-void DeviceX::SetZero_Type9(int& motor_index) {
+bool DeviceX::SetZero_Type9(int& motor_index) {
     const auto& info = (*p_motors_data)[motor_index].info;
     uint8_t data[8] = {0};
 
     make_jc_write16(data, 0x00A7, 1);
-    sendStandardFrame(0x600U + static_cast<uint32_t>(info.canid), data, sizeof(data));
+    return sendStandardFrame(0x600U + static_cast<uint32_t>(info.canid), data, sizeof(data));
 }
 
 bool DeviceX::SetMode_Type9(int& motor_index, int mode) {
-    if (mode < 0) mode = 4;
-    if (mode > 5) mode = 5;
-    if (mode == 0) mode = 4;
     auto& motor = (*p_motors_data)[motor_index];
     motor.send.mode = static_cast<uint8_t>(mode);
 
@@ -2781,7 +2216,7 @@ bool DeviceX::SetMode_Type9(int& motor_index, int mode) {
     return sendStandardFrame(0x600U + static_cast<uint32_t>(info.canid), data, sizeof(data));
 }
 
-bool DeviceX::SendCommand_Type9(int& motor_index) {
+bool DeviceX::SendCommand_Type9(int& motor_index, std::unique_lock<std::mutex>& lock) {
     auto& motor = (*p_motors_data)[motor_index];
     const auto& info = motor.info;
     auto& cmd = motor.send;
@@ -2792,7 +2227,7 @@ bool DeviceX::SendCommand_Type9(int& motor_index) {
         cmd.mode = 4;
         make_jc_write16(data, 0x0060, 4);
         mode_sent = sendStandardFrame(0x600U + static_cast<uint32_t>(info.canid), data, sizeof(data));
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        sleep_without_motor_lock(lock, std::chrono::milliseconds(1));
         std::fill(data, data + sizeof(data), 0);
     }
 
@@ -2829,6 +2264,14 @@ void DeviceX::ReceiveLoop() {
         int n = read(socket_fd, &frame, sizeof(frame));
         if (n < 0) {
             if (errno == EINTR) continue;
+            if (errno == ENETDOWN) {
+                std::cerr << "ReceiveLoop: network is down on " << iface_name << std::endl;
+                is_running = false;
+                const int fd = socket_fd.exchange(-1);
+                if (fd >= 0) close(fd);
+                break;
+            }
+            if (!is_running || errno == EBADF) break;
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
             continue;
         }
@@ -2840,38 +2283,8 @@ void DeviceX::ReceiveLoop() {
         if (frame_len == 0 || frame_len > CANFD_MAX_DLEN) continue;
 
         int parsed_motor_id = -1;
-        uint8_t rx_channel = 0;
         const bool is_eff = (frame.can_id & CAN_EFF_FLAG) != 0;
         const uint32_t canID = frame.can_id & (is_eff ? CAN_EFF_MASK : CAN_SFF_MASK);
-
-        if (!is_eff && canID == 0 && frame_len >= 64 && p_motors_data) {
-            for (int idx = 0; idx < static_cast<int>(p_motors_data->size()); ++idx) {
-                Motor_CAN_Struct& motor = (*p_motors_data)[idx];
-                if (motor.info.device_index != device_global_index ||
-                    motor.info.api_type != 6 ||
-                    motor.info.canid < 1 ||
-                    motor.info.canid > 8) {
-                    continue;
-                }
-
-                const std::size_t offset = static_cast<std::size_t>(motor.info.canid - 1) * 8U;
-                const float pos_feedback = read_le_f32(&frame.data[offset]);
-                const float cur_feedback = read_le_f32(&frame.data[offset + 4]);
-                if (std::isfinite(pos_feedback)) {
-                    motor.recv.current_position_f.store(pos_feedback);
-                }
-                if (std::isfinite(cur_feedback)) {
-                    motor.recv.current_torque_f.store(cur_feedback);
-                    motor.recv.current_iq_f.store(cur_feedback);
-                }
-                motor.recv.current_speed_f.store(0.0f);
-                motor.recv.motor_id = static_cast<uint8_t>(motor.info.canid);
-                motor.recv.mode = motor.send.mode;
-                motor.recv.motor_state = 1;
-                motor.recv.fault_message = 0;
-            }
-            continue;
-        }
 
         if (is_eff) {
             parsed_motor_id = (canID >> 8) & 0xFF;
@@ -2893,7 +2306,7 @@ void DeviceX::ReceiveLoop() {
             } else if (canID >= 0x201 && canID <= 0x208) {
                 parsed_motor_id = canID - 0x200;
             } else if (canID > 0 && canID <= 0xFF) {
-                // PFL28/L28, Haitai, and ENCOS standard frames: CAN ID is node id/device address.
+                // Haitai and ENCOS standard frames use CAN ID as the device address.
                 parsed_motor_id = static_cast<int>(canID);
             } else if ((((canID >> 8) & 0x7F) > 0) && ((canID & 0x7F) == 0 || (canID & 0x7F) == 0x7F)) {
                 // HighTorque reply id format: [src(7bit)][dst(7bit)].
@@ -2905,14 +2318,20 @@ void DeviceX::ReceiveLoop() {
 
         if (parsed_motor_id < 0) continue;
 
-        int g_idx = p_mapper->get_id({(uint)device_global_index, (uint)rx_channel, (uint)parsed_motor_id});
+        int g_idx = p_mapper->get_id(device_global_index, is_eff, parsed_motor_id);
+
+        if (g_idx < 0 && is_eff) {
+            const int alt_motor_id = (canID >> 8) & 0x7F;
+            g_idx = p_mapper->get_id(device_global_index, true, alt_motor_id);
+            if (g_idx >= 0) parsed_motor_id = alt_motor_id;
+        }
 
         // Fallback for protocols that carry motor id in payload nibble.
         if (g_idx < 0 && !is_eff && frame_len > 0) {
             const int alt_motor_id = frame.data[0] & 0x0F;
             if (alt_motor_id != parsed_motor_id) {
                 const int alt_idx = p_mapper->get_id(
-                    {(uint)device_global_index, (uint)rx_channel, (uint)alt_motor_id});
+                    device_global_index, false, alt_motor_id);
                 if (alt_idx >= 0) {
                     parsed_motor_id = alt_motor_id;
                     g_idx = alt_idx;
@@ -2922,10 +2341,13 @@ void DeviceX::ReceiveLoop() {
 
         if (g_idx < 0 || g_idx >= (int)p_motors_data->size()) continue;
 
+        std::lock_guard<std::mutex> lock(*p_motor_mutex);
         Motor_CAN_Struct& motor = (*p_motors_data)[g_idx];
+        bool handled = false;
 
         if (motor.info.api_type == 8 && !is_eff && canID == 0x7FF &&
             frame_len >= 4 && frame.data[2] == 0x01) {
+            handled = true;
             motor.recv.motor_id = static_cast<uint8_t>(parsed_motor_id);
             if (frame.data[3] == 0x03) {
                 motor.recv.current_position_f.store(0.0f);
@@ -2939,6 +2361,7 @@ void DeviceX::ReceiveLoop() {
             uint8_t type_field = (canID >> 24) & 0x1F;
 
             if (type_field == 2 && frame_len >= 8) {
+                handled = true;
                 uint16_t p_int = (frame.data[0] << 8) | frame.data[1];
                 uint16_t v_int = (frame.data[2] << 8) | frame.data[3];
                 uint16_t t_int = (frame.data[4] << 8) | frame.data[5];
@@ -2950,14 +2373,18 @@ void DeviceX::ReceiveLoop() {
                 motor.recv.current_temp_f.store((float)temp_int / 10.0f);
 
                 motor.recv.fault_message = (canID >> 16) & 0x3F;
-                motor.recv.mode = (canID >> 22) & 0x03;
+                const uint8_t run_state = static_cast<uint8_t>((canID >> 22) & 0x03);
+                motor.recv.motor_state = run_state == 2 ? 1 : 0;
+                motor.recv.mode = motor.send.mode;
             } else if (type_field == 17 && frame_len >= 8) {
                 if (frame.data[0] == 0x19 && frame.data[1] == 0x70) {
+                    handled = true;
                     float temp_val = 0.0f;
                     std::memcpy(&temp_val, &frame.data[4], 4);
                     motor.recv.current_position_f.store(temp_val);
                 }
             } else if (type_field == 21 && frame_len >= 4) {
+                handled = true;
                 uint32_t fault_word = 0;
                 std::memcpy(&fault_word, &frame.data[0], 4);
                 motor.recv.fault_message = static_cast<uint8_t>(fault_word);
@@ -2965,6 +2392,7 @@ void DeviceX::ReceiveLoop() {
         } else if (motor.info.api_type == 2 && !(frame.can_id & CAN_EFF_FLAG)) {
             uint8_t status = frame.data[0];
             if (frame_len >= 8 && (status == 0x9C || status == 0xA1 || status == 0xA2 || status == 0xA3)) {
+                handled = true;
                 int8_t temp = static_cast<int8_t>(frame.data[1]);
                 int16_t iq_raw = static_cast<int16_t>((frame.data[3] << 8) | frame.data[2]);
                 int16_t spd_raw = static_cast<int16_t>((frame.data[5] << 8) | frame.data[4]);
@@ -2980,6 +2408,7 @@ void DeviceX::ReceiveLoop() {
                 motor.recv.fault_message = 0;
             }
         } else if (motor.info.api_type == 3 && frame_len >= 8) {
+            handled = true;
             uint8_t id_and_err = frame.data[0];
             uint8_t err = (id_and_err >> 4) & 0x0F;
             uint8_t motor_id = id_and_err & 0x0F;
@@ -2995,34 +2424,13 @@ void DeviceX::ReceiveLoop() {
 
             motor.recv.motor_id = motor_id;
             motor.recv.fault_message = err;
-        } else if (motor.info.api_type == 6 && !(frame.can_id & CAN_EFF_FLAG) && frame_len >= 8) {
-            float pos_feedback = 0.0f;
-            float cur_feedback = 0.0f;
-            std::memcpy(&pos_feedback, &frame.data[0], sizeof(float));
-            std::memcpy(&cur_feedback, &frame.data[4], sizeof(float));
-
-            if (std::isfinite(pos_feedback)) {
-                motor.recv.current_position_f.store(pos_feedback);
-            }
-            if (std::isfinite(cur_feedback)) {
-                motor.recv.current_torque_f.store(cur_feedback);
-                motor.recv.current_iq_f.store(cur_feedback);
-            }
-            motor.recv.current_speed_f.store(0.0f);
-            motor.recv.motor_id = static_cast<uint8_t>(parsed_motor_id);
-            motor.recv.mode = motor.send.mode;
-            motor.recv.motor_state = 1; // full state frame (pos+cur)
-            motor.recv.fault_message = 0;
-        } else if (motor.info.api_type == 6 && !(frame.can_id & CAN_EFF_FLAG) && frame_len == 4) {
-            // Some PFL28 firmwares return compact status/error frames.
-            // Observed pattern: [0x07, 0x02, 0x00, err_code].
-            motor.recv.motor_id = static_cast<uint8_t>(parsed_motor_id);
-            motor.recv.mode = frame.data[0];
-            motor.recv.motor_state = 2; // compact status/error frame
-            motor.recv.fault_message = frame.data[3];
         } else if (motor.info.api_type == 7 && !(frame.can_id & CAN_EFF_FLAG)) {
             std::array<uint8_t, 8> raw {};
             std::memcpy(raw.data(), frame.data, std::min<std::size_t>(frame_len, raw.size()));
+
+            if (raw[0] == 0xF1 && !motor.recv.haitai_mit_limits_valid) {
+                continue;
+            }
 
             HaitaiFeedback feedback {};
             const float mit_pos_max = motor.recv.haitai_mit_limits_valid ?
@@ -3035,6 +2443,7 @@ void DeviceX::ReceiveLoop() {
                                        mit_pos_max, mit_vel_max, mit_torque_max)) {
                 continue;
             }
+            handled = true;
 
             if (feedback.has_position) {
                 motor.recv.current_position_f.store(feedback.position_rad);
@@ -3044,7 +2453,8 @@ void DeviceX::ReceiveLoop() {
             }
             if (feedback.has_current) {
                 motor.recv.current_iq_f.store(feedback.current_a);
-                motor.recv.current_torque_f.store(feedback.current_a);
+                motor.recv.current_torque_f.store(
+                    std::numeric_limits<float>::quiet_NaN());
             }
             if (feedback.has_torque) {
                 motor.recv.current_torque_f.store(feedback.torque_nm);
@@ -3081,17 +2491,10 @@ void DeviceX::ReceiveLoop() {
                 motor.recv.motor_state = 1;
             }
 
-            if ((feedback.command == 0xA3 || feedback.command == 0xC2 ||
-                 feedback.command == 0xC3 || feedback.command == 0xC4) &&
-                frame_len >= 7) {
-                const uint16_t angle_single = static_cast<uint16_t>(frame.data[1]) |
-                                              (static_cast<uint16_t>(frame.data[2]) << 8);
+            if (feedback.command == 0xA3 || feedback.command == 0xC2 ||
+                feedback.command == 0xC3 || feedback.command == 0xC4) {
                 motor.recv.motor_state = 1;
                 motor.recv.mode = motor.send.mode;
-                if (std::fabs(motor.recv.current_position_f.load()) < 1e-6f) {
-                    const float single_turn_rad = static_cast<float>(angle_single) * HAITAI_COUNT_TO_RAD;
-                    motor.recv.current_position_f.store(haitai_wrap_to_signed_pi(single_turn_rad));
-                }
             } else if ((feedback.command == 0xA1 || feedback.command == 0xC0 ||
                         feedback.command == 0xA2 || feedback.command == 0xC1)) {
                 motor.recv.mode = motor.send.mode;
@@ -3109,13 +2512,13 @@ void DeviceX::ReceiveLoop() {
             }
 
             motor.recv.motor_id = static_cast<uint8_t>(parsed_motor_id);
-            motor.recv.feedback_sequence.fetch_add(1, std::memory_order_relaxed);
         } else if (motor.info.api_type == 8 && !(frame.can_id & CAN_EFF_FLAG)) {
             const encos::Feedback feedback = encos::parse_feedback(
                 frame.data, frame_len, encos::limits_from_info(motor.info));
             if (!feedback.valid) {
                 continue;
             }
+            handled = true;
 
             motor.recv.motor_id = static_cast<uint8_t>(parsed_motor_id);
             motor.recv.fault_message = feedback.error;
@@ -3127,14 +2530,15 @@ void DeviceX::ReceiveLoop() {
             }
             if (feedback.has_current) {
                 motor.recv.current_iq_f.store(feedback.current_a);
-                motor.recv.current_torque_f.store(feedback.current_a);
+                const float torque = motor.info.torque_constant > 0.0f
+                    ? feedback.current_a * motor.info.torque_constant
+                    : std::numeric_limits<float>::quiet_NaN();
+                motor.recv.current_torque_f.store(torque);
             }
             if (feedback.has_temperature) {
                 motor.recv.current_temp_f.store(feedback.temperature_c);
             }
-            if (feedback.mode != 0) {
-                motor.recv.mode = feedback.mode;
-            }
+            motor.recv.mode = motor.send.mode;
             if (feedback.has_state) {
                 motor.recv.motor_state = feedback.state;
             }
@@ -3143,35 +2547,44 @@ void DeviceX::ReceiveLoop() {
             const uint16_t reg = static_cast<uint16_t>(
                 (static_cast<uint16_t>(frame.data[1]) << 8) | frame.data[2]);
 
-            motor.recv.motor_id = static_cast<uint8_t>(parsed_motor_id);
-            motor.recv.motor_state = 1;
             if (cmd == 0x2A) {
+                handled = true;
                 const int32_t pos_raw = jc_read_be_i24(&frame.data[1]);
                 const int16_t speed_raw = jc_read_be_i16(&frame.data[4]);
                 const int16_t current_raw = jc_read_be_i16(&frame.data[6]);
                 motor.recv.current_position_f.store(jc_deg_x100_to_rad(pos_raw));
                 motor.recv.current_speed_f.store(jc_rpm_to_rad_s(speed_raw));
-                motor.recv.current_torque_f.store(static_cast<float>(current_raw) * 0.01f);
+                motor.recv.current_iq_f.store(static_cast<float>(current_raw) * 0.01f);
+                motor.recv.current_torque_f.store(
+                    std::numeric_limits<float>::quiet_NaN());
                 motor.recv.mode = motor.send.mode;
                 motor.recv.fault_message = 0;
             } else if ((cmd == 0x43 || cmd == 0x23) && (reg == 0x0008 || reg == 0x0023)) {
+                handled = true;
                 const int32_t pos_raw = jc_read_be_i32(&frame.data[4]);
                 motor.recv.current_position_f.store(jc_deg_x100_to_rad(pos_raw));
                 motor.recv.mode = motor.send.mode;
                 motor.recv.fault_message = 0;
             } else if ((cmd == 0x43 || cmd == 0x23) && reg == 0x0021) {
+                handled = true;
                 const int32_t speed_raw = jc_read_be_i32(&frame.data[4]);
                 motor.recv.current_speed_f.store(jc_rpm_x100_to_rad_s(speed_raw));
             } else if ((cmd == 0x4B || cmd == 0x2B) && reg == 0x0020) {
+                handled = true;
                 const int16_t tq_raw = static_cast<int16_t>(
                     (static_cast<uint16_t>(frame.data[4]) << 8) | frame.data[5]);
                 motor.recv.current_torque_f.store(static_cast<float>(tq_raw) * 0.01f);
             } else if ((cmd == 0x43 || cmd == 0x4B) && reg == 0x000C) {
+                handled = true;
                 motor.recv.fault_message = frame.data[7];
             } else if ((cmd == 0x4B || cmd == 0x2B) && reg == 0x0060) {
+                handled = true;
                 motor.recv.mode = frame.data[5];
             }
-            motor.recv.feedback_sequence.fetch_add(1, std::memory_order_relaxed);
+            if (handled) {
+                motor.recv.motor_id = static_cast<uint8_t>(parsed_motor_id);
+                motor.recv.motor_state = 1;
+            }
         } else if (motor.info.api_type == 5) {
             if (frame_len < 2) continue;
             const HQTypeAdapt adapt = get_hq_type_adapt(motor.info.type);
@@ -3180,6 +2593,7 @@ void DeviceX::ReceiveLoop() {
             if (cmd == 0x24 && frame_len >= 14 &&
                 frame.data[1] == 0x04 && frame.data[2] == 0x00 &&
                 frame.data[11] == 0x21 && frame.data[12] == 0x0F) {
+                handled = true;
                 const int16_t pos_raw = read_le_i16(&frame.data[5]);
                 const int16_t vel_raw = read_le_i16(&frame.data[7]);
                 const int16_t tq_raw = read_le_i16(&frame.data[9]);
@@ -3191,7 +2605,8 @@ void DeviceX::ReceiveLoop() {
 
                 motor.recv.current_position_f.store(pos_turn * TWO_PI);
                 motor.recv.current_speed_f.store(vel_turn_s * TWO_PI);
-                motor.recv.current_iq_f.store(tq_driver);
+                motor.recv.current_iq_f.store(
+                    std::numeric_limits<float>::quiet_NaN());
                 motor.recv.current_torque_f.store(tq_nm);
                 motor.recv.motor_id = static_cast<uint8_t>(parsed_motor_id);
                 motor.recv.mode = frame.data[3];
@@ -3199,6 +2614,7 @@ void DeviceX::ReceiveLoop() {
             } else if (cmd == 0x28 && frame_len >= 22 &&
                        frame.data[1] == 0x04 && frame.data[2] == 0x00 &&
                        frame.data[19] == 0x21 && frame.data[20] == 0x0F) {
+                handled = true;
                 const int32_t pos_raw = read_le_i32(&frame.data[7]);
                 const int32_t vel_raw = read_le_i32(&frame.data[11]);
                 const int32_t tq_raw = read_le_i32(&frame.data[15]);
@@ -3210,7 +2626,8 @@ void DeviceX::ReceiveLoop() {
 
                 motor.recv.current_position_f.store(pos_turn * TWO_PI);
                 motor.recv.current_speed_f.store(vel_turn_s * TWO_PI);
-                motor.recv.current_iq_f.store(tq_driver);
+                motor.recv.current_iq_f.store(
+                    std::numeric_limits<float>::quiet_NaN());
                 motor.recv.current_torque_f.store(tq_nm);
                 motor.recv.motor_id = static_cast<uint8_t>(parsed_motor_id);
                 motor.recv.mode = frame.data[3];
@@ -3218,6 +2635,7 @@ void DeviceX::ReceiveLoop() {
             } else if (cmd == 0x2C && frame_len >= 22 &&
                        frame.data[1] == 0x04 && frame.data[2] == 0x00 &&
                        frame.data[19] == 0x21 && frame.data[20] == 0x0F) {
+                handled = true;
                 const float pos_turn = read_le_f32(&frame.data[7]);
                 const float vel_turn_s = read_le_f32(&frame.data[11]);
                 const float tq_driver = read_le_f32(&frame.data[15]);
@@ -3225,12 +2643,14 @@ void DeviceX::ReceiveLoop() {
 
                 motor.recv.current_position_f.store(pos_turn * TWO_PI);
                 motor.recv.current_speed_f.store(vel_turn_s * TWO_PI);
-                motor.recv.current_iq_f.store(tq_driver);
+                motor.recv.current_iq_f.store(
+                    std::numeric_limits<float>::quiet_NaN());
                 motor.recv.current_torque_f.store(tq_nm);
                 motor.recv.motor_id = static_cast<uint8_t>(parsed_motor_id);
                 motor.recv.mode = frame.data[3];
                 motor.recv.fault_message = frame.data[21];
             } else if (cmd == 0x27 && frame.data[1] == 0x01 && frame_len >= 8) {
+                handled = true;
                 const int16_t pos_raw = read_le_i16(&frame.data[2]);
                 const int16_t vel_raw = read_le_i16(&frame.data[4]);
                 const int16_t tq_raw = read_le_i16(&frame.data[6]);
@@ -3241,12 +2661,16 @@ void DeviceX::ReceiveLoop() {
 
                 motor.recv.current_position_f.store(pos_turn * TWO_PI);
                 motor.recv.current_speed_f.store(vel_turn_s * TWO_PI);
-                motor.recv.current_iq_f.store(tq_driver);
+                motor.recv.current_iq_f.store(
+                    std::numeric_limits<float>::quiet_NaN());
                 motor.recv.current_torque_f.store(tq_nm);
                 motor.recv.motor_id = static_cast<uint8_t>(parsed_motor_id);
                 motor.recv.mode = motor.send.mode;
                 motor.recv.fault_message = 0;
             }
         }
+        if (!handled) continue;
+        motor.recv.last_feedback_ns = steady_time_ns();
+        motor.recv.feedback_sequence.fetch_add(1, std::memory_order_relaxed);
     }
 }

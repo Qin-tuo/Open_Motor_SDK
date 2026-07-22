@@ -50,7 +50,6 @@ target_link_libraries(khcan_driver PUBLIC
 set(KHCAN_TOOL_TARGETS
   show_status
   test_mit_mode
-  test_rs01_speed_swing
 )
 
 foreach(tool ${KHCAN_TOOL_TARGETS})
@@ -99,11 +98,6 @@ install(TARGETS motor_driver_node
   DESTINATION lib/${PROJECT_NAME}
 )
 
-install(PROGRAMS
-  scripts/neck_zero_eye_swing.py
-  DESTINATION lib/${PROJECT_NAME}
-)
-
 install(DIRECTORY include/
   DESTINATION include
 )
@@ -120,5 +114,14 @@ ament_export_targets(export_khcan_driver HAS_LIBRARY_TARGET)
 ament_export_include_directories(include)
 ament_export_libraries(khcan_driver)
 ament_export_dependencies(rosidl_default_runtime Threads)
+
+if(BUILD_TESTING)
+  enable_testing()
+  add_executable(test_driver_core test/test_driver_core.cpp)
+  target_link_libraries(test_driver_core khcan_driver)
+  add_test(NAME driver_core COMMAND test_driver_core ${CMAKE_CURRENT_SOURCE_DIR}/config/motor.toml)
+  add_test(NAME config_m4 COMMAND test_driver_core ${CMAKE_CURRENT_SOURCE_DIR}/config/m4.toml)
+  add_test(NAME config_k1 COMMAND test_driver_core ${CMAKE_CURRENT_SOURCE_DIR}/config/k1.toml)
+endif()
 
 ament_package()

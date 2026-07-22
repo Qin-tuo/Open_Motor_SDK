@@ -1,33 +1,35 @@
 #pragma once
-#include <vector>
-#include <string>
+#include <algorithm>
 #include <atomic>
-#include <cstdint>
+#include <chrono>
 #include <cmath>
-
-using uint = unsigned int;
+#include <cstdint>
+#include <string>
 
 // 工具函数：设为 inline 防止重定义错误
 inline int float_to_uint(float x, float x_min, float x_max, int bits)
 {
-    float span = x_max - x_min;
-    float offset = x_min;
-    if (x > x_max)
-        x = x_max;
-    else if (x < x_min)
-        x = x_min;
-    return (int)((x - offset) * ((float)((1 << bits) - 1)) / span);
+    if (!std::isfinite(x) || !std::isfinite(x_min) || !std::isfinite(x_max) ||
+        x_max <= x_min || bits <= 0 || bits >= 31) {
+        return 0;
+    }
+    x = std::clamp(x, x_min, x_max);
+    return static_cast<int>((x - x_min) * static_cast<float>((1U << bits) - 1U) /
+                            (x_max - x_min));
 }
 
 inline float uint_to_float(int x_int, float x_min, float x_max, int bits)
 {
-    float span = x_max - x_min;
-    float offset = x_min;
-    return ((float)x_int) * span / ((float)((1 << bits) - 1)) + offset;
+    if (!std::isfinite(x_min) || !std::isfinite(x_max) ||
+        x_max <= x_min || bits <= 0 || bits >= 31) {
+        return x_min;
+    }
+    return static_cast<float>(x_int) * (x_max - x_min) /
+           static_cast<float>((1U << bits) - 1U) + x_min;
 }
 
 // 结构体定义
-typedef struct
+struct Motor_CAN_Send_Struct
 {
     uint8_t mode = 0;
     float position = 0.0f;
@@ -35,7 +37,7 @@ typedef struct
     float kp = 0.0f;
     float kd = 0.0f;
     float torque = 0.0f;
-} Motor_CAN_Send_Struct;
+};
 
 struct Motor_CAN_Receive_Struct
 {
@@ -64,6 +66,10 @@ struct Motor_CAN_Receive_Struct
     std::atomic<bool> haitai_mit_in_mode;
     std::atomic<bool> haitai_mit_fault;
     std::atomic<unsigned long long> feedback_sequence;
+    uint64_t last_feedback_ns;
+    uint64_t last_version_query_ns;
+    uint64_t last_mit_limits_query_ns;
+    uint64_t poll_sequence;
 
     Motor_CAN_Receive_Struct()
     {
@@ -91,6 +97,10 @@ struct Motor_CAN_Receive_Struct
         haitai_mit_in_mode = false;
         haitai_mit_fault = false;
         feedback_sequence = 0;
+        last_feedback_ns = 0;
+        last_version_query_ns = 0;
+        last_mit_limits_query_ns = 0;
+        poll_sequence = 0;
     }
 
     Motor_CAN_Receive_Struct(const Motor_CAN_Receive_Struct &other)
@@ -119,6 +129,10 @@ struct Motor_CAN_Receive_Struct
         haitai_mit_in_mode.store(other.haitai_mit_in_mode.load());
         haitai_mit_fault.store(other.haitai_mit_fault.load());
         feedback_sequence.store(other.feedback_sequence.load());
+        last_feedback_ns = other.last_feedback_ns;
+        last_version_query_ns = other.last_version_query_ns;
+        last_mit_limits_query_ns = other.last_mit_limits_query_ns;
+        poll_sequence = other.poll_sequence;
     }
 
     Motor_CAN_Receive_Struct &operator=(const Motor_CAN_Receive_Struct &other)
@@ -149,12 +163,16 @@ struct Motor_CAN_Receive_Struct
             haitai_mit_in_mode.store(other.haitai_mit_in_mode.load());
             haitai_mit_fault.store(other.haitai_mit_fault.load());
             feedback_sequence.store(other.feedback_sequence.load());
+            last_feedback_ns = other.last_feedback_ns;
+            last_version_query_ns = other.last_version_query_ns;
+            last_mit_limits_query_ns = other.last_mit_limits_query_ns;
+            poll_sequence = other.poll_sequence;
         }
         return *this;
     }
 };
 
-typedef struct
+struct Motor_CAN_Info_Struct
 {
     int num;
     std::string name;
@@ -164,22 +182,81 @@ typedef struct
     int device_index;
     int chan;
     int canid;
-    std::string port;
-    int baud;
 
     float p_min, p_max;
     float v_min, v_max;
     float kp_min, kp_max;
     float kd_min, kd_max;
     float t_min, t_max;
+    float current_min, current_max;
+    float torque_constant;
     float kp_in_use, kd_in_use;
     float pos_min, pos_max;
+    int initial_mode;
     
-} Motor_CAN_Info_Struct;
+};
 
-typedef struct
+struct Motor_CAN_Struct
 {
     Motor_CAN_Send_Struct send;
     Motor_CAN_Receive_Struct recv;
     Motor_CAN_Info_Struct info;
-} Motor_CAN_Struct;
+};
+
+inline bool motor_uses_extended_frame(int api_type)
+{
+    return api_type == 1 || api_type == 5;
+}
+
+inline bool motor_mode_supported(int api_type, int mode)
+{
+    switch (api_type) {
+        case 1: return mode == 0 || mode == 2;
+        case 2: return mode >= 1 && mode <= 3;
+        case 3: return mode >= 0 && mode <= 3;
+        case 5: return mode >= 0 && mode <= 3;
+        case 7: return mode >= 0 && mode <= 4;
+        case 8: return mode >= 0 && mode <= 3;
+        case 9: return mode >= 1 && mode <= 5;
+        default: return false;
+    }
+}
+
+inline uint64_t steady_time_ns()
+{
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+inline bool sanitize_motor_command(const Motor_CAN_Info_Struct& info,
+                                   Motor_CAN_Send_Struct& command)
+{
+    if (!std::isfinite(command.position) || !std::isfinite(command.speed) ||
+        !std::isfinite(command.torque) || !std::isfinite(command.kp) ||
+        !std::isfinite(command.kd)) {
+        return false;
+    }
+
+    const float position_min = info.pos_min < info.pos_max ? info.pos_min : info.p_min;
+    const float position_max = info.pos_min < info.pos_max ? info.pos_max : info.p_max;
+    const bool current_limit_command = info.current_min < info.current_max && (
+        (info.api_type == 1 && command.mode == 2) ||
+        (info.api_type == 7 && command.mode == 1) ||
+        (info.api_type == 8 && (command.mode == 1 || command.mode == 2)));
+    if (info.api_type == 1 && command.mode == 2 &&
+        std::fabs(command.torque) <= 1e-6f) {
+        return false;
+    }
+    const float effort_min = current_limit_command ? info.current_min : info.t_min;
+    const float effort_max = current_limit_command ? info.current_max : info.t_max;
+    if (!(position_min < position_max) || !(info.v_min < info.v_max) ||
+        !(effort_min < effort_max)) {
+        return false;
+    }
+    command.position = std::clamp(command.position, position_min, position_max);
+    command.speed = std::clamp(command.speed, info.v_min, info.v_max);
+    command.torque = std::clamp(command.torque, effort_min, effort_max);
+    if (info.kp_min < info.kp_max) command.kp = std::clamp(command.kp, info.kp_min, info.kp_max);
+    if (info.kd_min < info.kd_max) command.kd = std::clamp(command.kd, info.kd_min, info.kd_max);
+    return true;
+}

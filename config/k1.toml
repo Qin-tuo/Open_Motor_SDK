@@ -1,0 +1,23 @@
+motors = [
+  { num =  2, name = "joint_rShoulderPitch", type = "RS00",            api_type = 1, chan = 4, canid =   1, kp_in_use = 18.0, kd_in_use = 0.8, pos_min = -3.14, pos_max = 3.14 },
+  { num =  3, name = "joint_rShoulderRoll",  type = "RS00",            api_type = 1, chan = 4, canid =   2, kp_in_use = 18.0, kd_in_use = 0.8, pos_min = -3.14, pos_max = 3.14 },
+  { num =  4, name = "joint_rShoulderYaw",   type = "RS00",            api_type = 1, chan = 4, canid =   3, kp_in_use = 1.5,  kd_in_use = 0.1, pos_min = -3.14, pos_max = 3.14 },
+  { num =  5, name = "joint_rElbow",         type = "RS00",            api_type = 1, chan = 4, canid =   4, kp_in_use = 1.5,  kd_in_use = 0.1, pos_min = -3.14, pos_max = 3.14 },
+
+  { num =  6, name = "joint_lShoulderPitch", type = "RS00",            api_type = 1, chan = 3, canid =   1, kp_in_use = 18.0, kd_in_use = 0.8, pos_min = -3.14, pos_max = 3.14 },
+  { num =  7, name = "joint_lShoulderRoll",  type = "RS00",            api_type = 1, chan = 3, canid =   2, kp_in_use = 18.0, kd_in_use = 0.8, pos_min = -3.14, pos_max = 3.14 },
+  { num =  8, name = "joint_lShoulderYaw",   type = "RS00",            api_type = 1, chan = 3, canid =   3, kp_in_use = 1.5,  kd_in_use = 0.1, pos_min = -3.14, pos_max = 3.14 },
+  { num =  9, name = "joint_lElbow",         type = "RS00",            api_type = 1, chan = 3, canid =   4, kp_in_use = 1.5,  kd_in_use = 0.1, pos_min = -3.14, pos_max = 3.14 },
+
+  { num = 10, name = "right_hip_yaw_joint",   type = "EC-A4310-P2-36", api_type = 8, chan = 5, canid =   3, kp_in_use = 20, kd_in_use = 0.8 },
+  { num = 11, name = "right_hip_roll_joint",  type = "EC-A4315-P2-36", api_type = 8, chan = 5, canid =   2, kp_in_use = 20, kd_in_use = 0.8 },
+  { num = 12, name = "right_hip_pitch_joint", type = "EC-A6408-P2-25", api_type = 8, chan = 5, canid =   1, kp_in_use = 20, kd_in_use = 0.8 },
+  { num = 13, name = "right_calf_joint",      type = "EC-A6416-P2-25", api_type = 8, chan = 5, canid =   4, kp_in_use = 20, kd_in_use = 0.8 },
+  { num = 14, name = "right_wheel_joint",     type = "RS01",            api_type = 1, chan = 6, canid = 127, kp_in_use = 20, kd_in_use = 0.8, initial_mode = 2 },
+
+  { num = 15, name = "left_hip_yaw_joint",   type = "EC-A4310-P2-36", api_type = 8, chan = 2, canid =   3, kp_in_use = 20, kd_in_use = 0.8 },
+  { num = 16, name = "left_hip_roll_joint",  type = "EC-A4315-P2-36", api_type = 8, chan = 2, canid =   2, kp_in_use = 20, kd_in_use = 0.8 },
+  { num = 17, name = "left_hip_pitch_joint", type = "EC-A6408-P2-25", api_type = 8, chan = 2, canid =   1, kp_in_use = 20, kd_in_use = 0.8 },
+  { num = 18, name = "left_calf_joint",      type = "EC-A6416-P2-25", api_type = 8, chan = 2, canid =   4, kp_in_use = 20, kd_in_use = 0.8 },
+  { num = 19, name = "left_wheel_joint",     type = "RS01",            api_type = 1, chan = 1, canid = 127, kp_in_use = 20, kd_in_use = 0.8, initial_mode = 2 },
+]

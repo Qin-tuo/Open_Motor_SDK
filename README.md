@@ -1,22 +1,31 @@
 # khcan 使用说明
 # ***!!!注意灵足/富兴、因克斯、达妙/达秒、海泰不同型号的 p/v/t/kp/kd 映射范围不同，必须使用正确型号或显式填写完整映射参数，否则会导致电机比例映射不正常!!!***
-**驱动已内置 https://can.robotsfan.com/ 中常见型号参数；TOML 中填写具体 `type` 即可自动匹配，未知型号才需要显式填写 `p_min/p_max/v_min/v_max/kp_min/kp_max/kd_min/kd_max/t_min/t_max`。**
-# **Type5（高擎）和 Type6（PFL28）默认使用 CAN FD。**
+**驱动内置常见型号的协议参数；TOML 中填写准确的 `type` 即可自动匹配，未知型号才需要显式填写 `p_min/p_max/v_min/v_max/kp_min/kp_max/kd_min/kd_max/t_min/t_max`。ENCOS 参数以仓库内 `doc/ENCOS协议.pdf` 的型号表为准。**
+# **Type5（高擎）默认使用 CAN FD。**
 
 ## 简介
-`khcan` 是一个基于 ROS 2 `ament_cmake` 的电机/舵机驱动包，主要支持 SocketCAN 电机，同时通过 Type4 接入飞特 TTL 串口舵机。
+`khcan` 是一个基于 ROS 2 `ament_cmake` 的 SocketCAN 电机驱动包。
 当前包会安装可复用驱动库 `libkhcan_driver.so`，其他 ROS 2 工程可直接链接该库进行控制；也提供单进程整体底层驱动节点 `motor_driver_node`，一次读取完整 `motor.toml`，再按 CAN 通道暴露 `/canX/...` 接口给上层控制。
 当前仓库中可用的入口程序有：
 - `motor_driver_node`：整体底层驱动节点，读取完整 TOML 后统一管理所有电机，并按通道提供 ROS 2 topic/service
 - `show_status`：从 `config/motor.toml` 读取配置，默认只周期性查询所有电机状态；清错、使能、退出失能必须显式加参数
 - `test_mit_mode`：根据 `api_type` 自动切换到 MIT 模式（Type1/2/3/5/8），对单个电机执行正弦摆动测试
-- `test_rs01_speed_swing`：RS01 轮电机走速度模式，其余关节先回零再小幅往复摆动
 
 ## 整体底层驱动节点
 推荐用 `motor_driver_node` 作为整机底层驱动入口：
 ```bash
 ros2 launch khcan motor_driver.launch.py
 ```
+
+仓库同时提供按本体区分的 bringup，分别固定加载各自的 TOML：
+```bash
+ros2 launch khcan m4_bringup.launch.py
+ros2 launch khcan k1_bringup.launch.py
+```
+
+- M4：`config/m4.toml`
+- K1：`config/k1.toml`
+- 通用/开发默认：`config/motor.toml`
 
 节点只创建一个 `BaseRobot` 实例，并一次加载完整 `motor.toml`。随后会根据 TOML 中出现的 `chan` 自动创建通道接口，例如 `chan = 1` 的电机会暴露在 `/can1/...` 下。
 
@@ -26,11 +35,18 @@ ros2 launch khcan motor_driver.launch.py
 |---|---|---|---|
 | `/canX/command` | `sensor_msgs/msg/JointState` | 上层发布 | 发送目标位置/速度/力矩 |
 | `/canX/joint_states` | `sensor_msgs/msg/JointState` | 上层订阅 | 当前通道电机反馈 |
+| `/canX/status_feedback` | `khcan/msg/MotorStatusArray` | 上层订阅 | 故障、模式、在线状态与反馈时延 |
 | `/canX/enable` | `std_srvs/srv/Trigger` | 上层调用 | 使能当前通道全部电机 |
 | `/canX/disable` | `std_srvs/srv/Trigger` | 上层调用 | 失能当前通道全部电机 |
 | `/canX/clear_error` | `std_srvs/srv/Trigger` | 上层调用 | 清除当前通道全部电机错误 |
 | `/canX/set_zero` | `std_srvs/srv/Trigger` | 上层调用 | 设置当前通道全部电机零点 |
 | `/canX/set_mode` | `khcan/srv/SetMotorMode` | 上层调用 | 设置当前通道全部或指定电机模式 |
+
+`/canX/status_feedback` 中每个 `MotorStatus` 包含 `name`、`motor_id`、`mode`、
+`motor_state`、`fault_code`、`online`、`feedback_age_ms`、`position`、`speed`、
+`torque`、`current` 和 `temperature`。
+
+`torque` 与 `current` 始终是不同物理量：协议直接反馈转矩时使用协议值；ENCOS 有型号 Kt 时由电流换算转矩；海泰/JC 只有电流反馈而没有可靠 Kt 时，`current` 使用 A，`torque` 发布为 NaN；Type5 只有驱动转矩反馈时，`torque` 使用 N·m，`current` 发布为 NaN。
 
 `/canX/command` 使用 `JointState.name` 匹配 `motor.toml` 中的电机 `name`。推荐上层始终带 `name`，避免通道内顺序变动造成误发：
 ```bash
@@ -39,6 +55,7 @@ ros2 topic pub --once /can1/command sensor_msgs/msg/JointState \
 ```
 
 如果 `name` 为空，则按该通道在 TOML 中的电机顺序匹配数组下标。`position`、`velocity`、`effort` 可只填需要更新的字段，未提供的字段会沿用上一条命令值。
+`effort` 在 MIT/力矩模式表示 N·m；在 Type1 速度模式、Type7 电流模式以及 Type8 位置/速度模式表示电流限制 A，驱动按当前模式选择对应型号范围限幅。Type1 速度模式必须显式给出大于 `0 A` 的限制值，省略或填 `0` 会拒绝命令。
 
 设置模式示例：
 ```bash
@@ -54,8 +71,22 @@ ros2 launch khcan motor_driver.launch.py \
   config:=/absolute/path/to/motor.toml \
   rate_hz:=100.0 \
   auto_enable:=false \
-  default_mode:=-1
+  default_mode:=-1 \
+  command_timeout_ms:=100 \
+  feedback_timeout_ms:=500
 ```
+
+`auto_enable:=true` 只发送使能命令，不会隐式清错；需要清错时显式调用 `/canX/clear_error`。
+
+## 安全、校验与状态新鲜度
+
+- 配置加载会校验必填字段、数值类型、量程、增益、CAN ID，以及重复的逻辑编号、名称和反馈路由；失败时抛出异常并终止节点初始化。
+- 反馈路由键由设备、标准/扩展帧格式和 CAN ID 共同组成，标准帧和扩展帧可以使用相同 ID。
+- 命令订阅使用 QoS `KeepLast(1)`；发送前拒绝 NaN/Inf，并按位置、速度、力矩和增益范围限幅。
+- `command_timeout_ms` 默认 `100`。电机收到命令后若超时，节点会发送失能命令；发送失败会在后续周期重试。设为 `0` 可关闭。
+- `feedback_timeout_ms` 默认 `500`。只有协议成功解析的反馈才刷新时间；`MotorStatus.online` 和 `feedback_age_ms` 使用单调时钟计算，从未收到有效反馈时 age 为 `uint32` 最大值。
+- CAN 接口进入 `ENETDOWN` 后会关闭套接字并停止接收线程。当前不自动重连，恢复接口后需重启节点。
+- `BaseRobot` 内部状态不公开；使用 `GetMotorInfo()`、`GetMotorSnapshot()` 和 `GetCommand_N()` 获取线程安全快照。
 
 ## 当前目录结构
 ```text
@@ -63,15 +94,18 @@ khcan/
 ├── CMakeLists.txt
 ├── package.xml
 ├── config/
-│   └── motor.toml
+│   ├── motor.toml
+│   ├── m4.toml
+│   └── k1.toml
 ├── include/
 ├── launch/
-│   └── motor_driver.launch.py
+│   ├── motor_driver.launch.py
+│   ├── m4_bringup.launch.py
+│   └── k1_bringup.launch.py
 ├── main/
 │   ├── motor_driver_node.cpp
 │   ├── show_status.cpp
-│   ├── test_mit_mode.cpp
-│   └── test_rs01_speed_swing.cpp
+│   └── test_mit_mode.cpp
 ├── srv/
 │   └── SetMotorMode.srv
 └── src/
@@ -81,64 +115,15 @@ khcan/
 - `main/motor_driver_node.cpp`：整体底层驱动节点；单进程加载完整 TOML，并按 `chan` 暴露 `/canX/...` 接口
 - `main/show_status.cpp`：状态查看入口；默认不清错、不使能、不退出失能
 - `main/test_mit_mode.cpp`：通用 MIT 测试入口，自动适配 Type1/2/3/5/8 的 MIT 模式编号
-- `main/test_rs01_speed_swing.cpp`：RS01 速度模式 + 8 个关节小幅摆动测试入口
-- `config/motor.toml`：电机编号、类型、CAN 通道、CAN ID 与控制参数配置
+- `config/motor.toml`：通用/开发默认配置
+- `config/m4.toml`、`config/k1.toml`：各本体独立配置
 - `srv/SetMotorMode.srv`：通道级设置模式服务
 - `launch/motor_driver.launch.py`：整体底层驱动节点启动文件
+- `launch/m4_bringup.launch.py`、`launch/k1_bringup.launch.py`：选择本体配置后复用通用启动文件
 - `src/config_loader.cpp`：加载 TOML 配置
-- `src/device.cpp`：SocketCAN 设备收发、海泰协议辅助和飞特 TTL 串口舵机协议接入
+- `src/device.cpp`：SocketCAN 设备收发和各类 CAN 协议解析
 - `src/robot.cpp`：机器人整体控制逻辑
 - `include/`：头文件与类型定义
-
-## 依赖
-### ROS 2 依赖
-当前包在 `package.xml` 中声明的主要依赖：
-- `ament_cmake`
-- `ament_index_cpp`
-- `rclcpp`
-- `sensor_msgs`
-- `std_srvs`
-- `rosidl_default_generators`
-- `rosidl_default_runtime`
-- `launch`
-- `launch_ros`
-- `ament_index_python`
-
-### 系统依赖
-代码直接使用 Linux SocketCAN 相关头文件与接口，因此需要：
-- Linux 系统
-- 可用的 CAN 网络接口，如 `can1`、`can2`
-- Type4 飞特舵机需要可用串口设备，如 `/dev/ttyUSB0`
-- 编译工具链，如 `g++`、`cmake`
-
-如果你的环境用的是 Conda Python，`colcon build` 可能会因为缺少 `catkin_pkg` 失败。此时可改用系统 Python 构建，或在当前 Python 环境中安装该依赖。
-
-## Linux SDK 驱动安装
-如果当前系统还没有安装昆宏 Linux SDK 驱动，可先完成以下步骤，再继续本仓库的编译与运行。
-
-### 系统环境需求
-1. Linux 系统运行 32 位或 64 位内核
-2. `make`、`gcc` 编译工具
-3. Linux 内核头文件包（需与当前内核版本匹配）
-4. `g++` 及 `libstdc++` 相关库
-5. `libpopt-dev`
-
-### 依赖安装命令
-```bash
-# 1) 安装编译基础工具
-sudo apt update && sudo apt install -y build-essential g++
-
-# 2) 安装内核头文件（必须与当前内核版本匹配）
-sudo apt install -y linux-headers-$(uname -r)
-
-# 3) 安装 libpopt 依赖
-sudo apt install -y libpopt-dev
-
-# 4) 校验 gcc 版本（需与内核编译版本一致）
-cat /boot/config-$(uname -r) | grep -i "gcc_version"
-# 示例输出：CONFIG_GCC_VERSION=120300（表示需安装 gcc-12）
-# 若版本不匹配：sudo apt install -y gcc-12
-```
 
 ### SDK 下载
 ```bash
@@ -158,72 +143,32 @@ cd KH-UCANFD_Linux_SDK_x.y.z/
 ./build.sh
 ```
 
-`build.sh` 常用参数：
-- `./build.sh`：安装驱动
-- `./build.sh -c`：交叉编译驱动
-- `./build.sh -rules`：安装驱动并加载 udev 命名规则
-- `./build.sh -u` / `./build.sh -uninstall`：卸载驱动
-- `./build.sh -h`：显示帮助
-
-### 编译与安装（手动方式）
-```bash
-sudo make clean
-sudo make netdev
-sudo make install
-```
-
-### 驱动加载验证
-```bash
-# 加载 kcan 模块并确认已加载
-sudo modprobe kcan
-lsmod | grep kcan
-
-# 确认 CAN 接口已识别（如 can0/can1）
-ip -d link show
-
-# 确认 USB 设备已绑定到 kcan 驱动
-lsusb -t
-```
-
-### Ubuntu 额外依赖
-```bash
-sudo modprobe can
-sudo modprobe can_raw
-sudo modprobe can_dev
-```
-
-### (可选) ROS2 封装相关依赖
-```bash
-sudo apt-get install net-tools
-sudo apt-get install can-utils
-sudo apt-get install ros-jazzy-can-msgs
-sudo apt-get install ros-jazzy-ros2-socketcan
-```
-
 ## 配置说明
 程序运行时会通过包安装目录读取：
 ```text
 share/khcan/config/motor.toml
 ```
-源码中的原始配置文件位于：
+M4/K1 bringup 会分别读取 `share/khcan/config/m4.toml` 和
+`share/khcan/config/k1.toml`。源码中的原始配置文件位于：
 ```text
-config/motor.toml
+config/*.toml
 ```
 
-`motor.toml` 中 `motors = [ {...}, {...} ]` 的每个内联表代表 1 个电机。  
-程序会按 `src/config_loader.cpp` 固定读取以下字段（缺失会报错退出）：
+多本体共用同一套驱动代码和型号表，本体 TOML 只保存该本体的关节名称、逻辑编号、CAN 路由、现场增益、软限位和初始模式。不要为每个本体复制驱动代码，也不要把 K1/M4 的路由合并进一个配置；bringup 通过 `config` 参数选择单份 TOML。新增本体时新增 `config/<body>.toml`，并复用 `motor_driver.launch.py` 即可。
+
+每个 TOML 中 `motors = [ {...}, {...} ]` 的每个内联表代表 1 个电机。
+程序会按 `src/config_loader.cpp` 读取以下字段；身份和路由字段必须填写，
+型号表已覆盖的协议映射字段可以省略：
 
 ### 字段总览
 | 字段 | 含义 | 典型单位/范围 | 是否参与控制报文 |
 |---|---|---|---|
-| `num` | 逻辑编号（业务编号） | 整数 | 否（仅上层标识） |
-| `name` | 电机名称（便于日志识别） | 字符串 | 否 |
-| `type` | 电机/舵机型号名（如 `RS06`、`EC-A4310-P2-36`、`DM8009`、`SCS0037-C001`、`M4438_30`、`PFL28`、`HT3505-J8`、`JC`） | 字符串 | Type1/3/4/7/8/9 下用于自动匹配映射范围；Type5 下参与力矩/增益缩放 |
-| `api_type` | 协议类型编号 | `1/2/3/4/5/6/7/8/9` | 是（决定走哪套协议） |
-| `chan` | CAN 通道号 | 正整数，如 `1` | CAN 电机使用，Type4 飞特串口舵机不填 |
-| `port` | 串口设备路径 | 如 `/dev/ttyUSB0` | Type4 飞特串口舵机使用 |
-| `baud` | 串口波特率 | SCS0037 默认 `500000` | Type4 飞特串口舵机使用，可省略 |
-| `canid` | 总线 ID | CAN 电机为 CAN ID；Type4 为飞特舵机 ID | 是 |
+| `num` | 逻辑编号（业务编号） | 正整数，整份配置内唯一 | 否（用于日志、状态标识和测试选择） |
+| `name` | 电机名称 | 非空字符串，整份配置内唯一 | 是（ROS 命令按名称路由） |
+| `type` | 电机型号名（如 `RS06`、`EC-A4310-P2-36`、`DM8009`、`M4438_30`、`HT3505-J8`、`JC`） | 字符串 | Type1/3/7/8/9 下用于自动匹配映射范围；Type5 下参与力矩/增益缩放 |
+| `api_type` | 协议类型编号 | `1/2/3/5/7/8/9` | 是（决定走哪套协议） |
+| `chan` | CAN 通道号 | 非负整数，如 `1` | 是（映射为 `can<chan>`） |
+| `canid` | 电机 CAN ID | 正整数，具体上限由协议决定；Type8 为 `1~255` | 是 |
 | `p_min` | 位置映射最小值 | 通常 rad | 是 |
 | `p_max` | 位置映射最大值 | 通常 rad | 是 |
 | `v_min` | 速度映射最小值 | 通常 rad/s | 是 |
@@ -234,59 +179,83 @@ config/motor.toml
 | `kd_max` | 微分增益映射最大值 | 协议定义范围内 | 是 |
 | `t_min` | 力矩映射最小值 | 通常 N·m（按驱动定义） | 是 |
 | `t_max` | 力矩映射最大值 | 通常 N·m（按驱动定义） | 是 |
-| `kp_in_use` | 上电默认使用的 `kp` | 浮点 | 是（Type4 暂保留但不参与飞特位置指令） |
-| `kd_in_use` | 上电默认使用的 `kd` | 浮点 | 是（Type4 暂保留但不参与飞特位置指令） |
+| `current_min` | 电流映射/限幅最小值 | A | 电流反馈解码和电流型命令限幅 |
+| `current_max` | 电流映射/限幅最大值 | A | 电流反馈解码和电流型命令限幅 |
+| `torque_constant` | 电流换算输出转矩的型号常数 | N·m/A | 有电流反馈时换算转矩 |
+| `kp_in_use` | 上电默认使用的 `kp` | 浮点，必须在映射范围内 | 是 |
+| `kd_in_use` | 上电默认使用的 `kd` | 浮点，必须在映射范围内 | 是 |
 | `pos_min` | 运行时位置软限位最小值 | 通常 rad | 间接（发送前限幅） |
 | `pos_max` | 运行时位置软限位最大值 | 通常 rad | 间接（发送前限幅） |
+| `initial_mode` | 创建 CAN 设备后设置的初始模式；省略表示不主动设置 | 必须是对应 `api_type` 支持的模式 | 是（初始化时设置模式） |
+
+### 字段精简规则
+
+- 每台电机必须保留 `num`、`name`、`type`、`api_type`、`chan`、`canid`。
+- `kp_in_use`、`kd_in_use` 是关节现场调参值，不是电机型号常量；除当前不使用增益的 Type9 外应保留。
+- 已知型号的 `p/v/kp/kd/t` 映射边界由型号表补齐，TOML 无需重复。显式填写时会覆盖型号表，并实际影响发送编码和反馈解码。
+- 已知 ENCOS/RS 型号的 `current_min/current_max` 以及 ENCOS 的 `torque_constant` 同样由型号表补齐。未知型号只有在需要电流型命令或电流反馈时才显式填写；缺少有效电流范围时，驱动拒绝对应命令而不是使用错误单位发送。
+- 未知型号必须提供完整映射边界。K1 的 `EC-A6416-P2-25` 已进入型号表：位置 `±12.5 rad`、速度 `±18 rad/s`、KP `0~500`、KD `0~5`、MIT/力矩范围 `±120 N·m`、反馈电流范围 `±60 A`、转矩常数 `2.74 N·m/A`。这些是不同物理量，不能互相代替。
+- `pos_min`、`pos_max` 只在 `pos_min < pos_max` 时启用软限位；两者均为 `0` 与省略等价，应直接省略。
+- M4/K1 的已知型号不在 TOML 中重复填写 `p/v/kp/kd/t/current` 型号常量；RS00 使用型号表的 `-14~14 N·m`。轮毂 RS01 只额外填写 `initial_mode = 2`，使 bringup 后进入速度模式。
+
+### ENCOS 型号表
+
+下表来自 `doc/ENCOS协议.pdf` 的 V1.19 型号参数表。所有型号的位置范围均为 `±12.5 rad`、速度范围均为 `±18 rad/s`、KP 均为 `0~500`；KD、MIT/力矩映射、电流反馈和转矩常数如下：
+
+| 型号 | KD | 转矩范围 (N·m) | 电流范围 (A) | Kt (N·m/A) |
+|---|---:|---:|---:|---:|
+| `EC-A8112-P1-18` | `0~5` | `±90` | `±60` | `2.1` |
+| `EC-A4310-P2-36` | `0~5` | `±30` | `±30` | `1.4` |
+| `EC-A4315-P2-36` | `0~5` | `±70` | `±30` | `2.8` |
+| `EC-A6408-P2-25` | `0~5` | `±60` | `±60` | `2.35` |
+| `EC-A6416-P2-25` | `0~5` | `±120` | `±60` | `2.74` |
+| `EC-A10020-P1-12` | `0~50` | `±150` | `±70` | `2.5` |
+| `EC-A10020-P2-24` | `0~50` | `±300` | `±140` | `2.6` |
+| `EC-A13715-P1-12.67` | `0~50` | `±320` | `±220` | `2.5` |
+| `EC-A13720-P1-11.4` | `0~50` | `±400` | `±220` | `2.5` |
 
 ### `api_type` 对照
 - `1`：Type1（灵足/富兴扩展帧协议）
 - `2`：Type2（领控）
 - `3`：Type3（达妙）
-- `4`：Type4（飞特 TTL 串口舵机协议，适配微雪/USB TTL 半双工控制板）
 - `5`：Type5（高擎 16-bit ID 协议）
-- `6`：Type6（AgiBot PFL28/L28，`pos(float)+current(float)`）
 - `7`：Type7（海泰标准帧协议）
 - `8`：Type8（ENCOS / 因克斯 EC-A 系列标准帧协议）
 - `9`：Type9（JC 系列标准 CAN 舵机协议）
 
 ### 驱动能力确认
-当前清理只删除了独立测试/排障入口，不影响底层电机驱动能力。Type1/2/3/5/6/7/8/9 仍走 `DeviceX` 的 SocketCAN/CAN FD 路径；Type4 已切换为飞特串口舵机路径，不再使用 SocketCAN。
+当前支持的 Type1/2/3/5/7/8/9 均走 `DeviceX` 的 SocketCAN/CAN FD 路径。
 
 | `api_type` | 驱动能力 | 当前诊断入口 |
 |---|---|---|
 | `1` | 保留 Type1 协议发送与反馈解析 | `test_mit_mode` 可用于 MIT 模式简单验证 |
 | `2` | 保留 Type2 协议发送与反馈解析 | `test_mit_mode` 可用于 MIT 模式简单验证 |
 | `3` | 保留 Type3 协议发送与反馈解析 | `test_mit_mode` 可用于 MIT 模式简单验证 |
-| `4` | 飞特 TTL 串口舵机发送与反馈解析，当前内置 `SCS0037-C001` 参数 | 推荐通过 `motor_driver_node` 的 `/canX/...` 接口或库 API 控制 |
 | `5` | 保留 Type5 / 高擎 CAN FD 协议发送与反馈解析 | `test_mit_mode` 可用于 MIT 模式简单验证 |
-| `6` | 保留 Type6 / PFL28 协议发送与反馈解析 | 独立 PFL28 诊断入口已删除，请通过库 API 控制 |
 | `7` | 保留 Type7 / 海泰 Rev.3.07b0 标准 CAN 协议发送与反馈解析，含绝对位置和 MIT 模式 | 可通过 `show_status` 或 `motor_driver_node` 查看状态 |
 | `8` | ENCOS / 因克斯 EC-A 系列标准 CAN 协议发送与反馈解析，支持 MIT/位置/速度/力矩 | `test_mit_mode` 可用于 MIT 模式简单验证 |
 | `9` | JC 系列标准 CAN 舵机协议，支持位置/速度/力矩发送和状态回读 | 推荐通过 `motor_driver_node` 的 `/canX/...` 接口控制 |
 
-也就是说，上层可通过 `motor_driver_node` 的通道接口控制整机，也可直接链接库后通过 `BaseRobot::Move_N()` / `BaseRobot::Move()` 进入统一发送路径；CAN 电机按各自 `api_type` 分发到 `DeviceX`，Type4 飞特舵机会分发到串口驱动。
+也就是说，上层可通过 `motor_driver_node` 的通道接口控制整机，也可直接链接库后通过 `BaseRobot::Move_N()` / `BaseRobot::Move()` 进入统一发送路径；CAN 电机按各自 `api_type` 分发到 `DeviceX`。
 
 ### 关键说明
-- `chan` 会转换成设备名 `can<chan>`。例如 `chan = 1` 会使用 `can1`；Type4 飞特串口舵机不用 `chan`，改填 `port`。
-- `type` 不参与协议分发（协议分发只看 `api_type`），但在 `api_type=1/3/4/7/8/9` 时会自动匹配映射范围；在 `api_type=5`（高擎）时会用于型号缩放适配：
+- `chan` 会转换成设备名 `can<chan>`。例如 `chan = 1` 会使用 `can1`。
+- `type` 不参与协议分发（协议分发只看 `api_type`），但在 `api_type=1/3/7/8/9` 时会自动匹配映射范围；在 `api_type=5`（高擎）时会用于型号缩放适配：
   - 力矩发送使用型号补偿（`tqe_adjust` 思路）
   - 力矩回读使用型号还原（`tqe_restore` 思路）
   - MIT 模式的 `kp/kd` 也会做型号补偿
   - 若 `type` 未匹配已知型号，则回退为 `k=1.0,d=0.0`（等价无补偿）
-- `api_type=6`（PFL28）默认将 `send.position` 作为位置命令、`send.torque` 作为电流命令（A）。
-- `api_type=8`（ENCOS / 因克斯 EC-A）使用经典标准 CAN 帧；`SetMode_N()` 支持 `0` MIT 混控、`1` 位置、`2` 速度、`3` 力矩/电流，`send.position/speed/torque/kp/kd` 按 EC-A 型号映射范围打包。
-- `api_type=9`（JC 系列）使用标准 CAN 帧；`SetMode_N()` 支持 `0~5`，其中 `1` 走速度命令、`5` 走力矩命令，其余模式默认按位置命令发送。`type = "JC"` 时会自动给出基础映射范围，`kp_in_use/kd_in_use` 可省略。
-- `api_type=4`（飞特 SCS0037-C001）默认将 `send.position` 按 `0~4.712389rad` 映射到舵机 `0~1023` 位置值；`send.speed` 按 rad/s 转成飞特速度值，填 `0` 表示不限制/由舵机默认处理；`send.torque` 暂不参与飞特位置指令。
-- 修改飞特舵机 ID 前，必须确保总线上只接一个舵机，避免多个出厂默认 `ID=1` 的舵机被同时改成同一个 ID。
-- Type1/3/7/8 的内置型号参数来自 `https://can.robotsfan.com/`：灵足/富兴支持 `RS00`~`RS06`、`CyberGear`；ENCOS/因克斯支持 `EC-A8112-P1-18`、`EC-A4310-P2-36`、`EC-A6408-P2-25`、`EC-A10020-P1-12`、`EC-A10020-P2-24`、`EC-A13715-P1-12.67`、`EC-A13720-P1-11.4`；达妙/达秒支持 `DM4310`、`DM4310_48V`、`DM4340`、`DM4340_48V`、`DM6006`、`DM8006`、`DM8009`、`DM10010L`、`DM10010`、`DMH3510`、`DMH6215`、`DMG6220`。
-- 对 Type1/2/3/4/7/8，`kp_in_use` 和 `kd_in_use` 仍建议显式保留在 TOML 中，便于现场调参；Type4 当前不使用 kp/kd 做闭环控制，但保留字段以兼容统一配置。Type9 当前不使用 `kp/kd`，可省略。`p/v/t/kp/kd` 的 `min/max` 可由型号表自动填写，也可以在 TOML 中显式覆盖。
-- `api_type=7`（海泰 Rev.3.07b0）默认将 `send.mode=0` 映射为 `0xC2` 绝对位置控制；`SetMode_N()` 支持 `0` 绝对位置、`1` 电流、`2` 速度、`3` 相对位置、`4` MIT 模式。海泰 `QueryPos` 使用 `0xA4` 复合状态查询，能同时回读位置、速度、电流和温度；驱动层不会在 `Enable_N()` 或 `SetMode_N()` 中自动查询/写入 `0xF0`，只有显式调用 `ConfigureHaitaiMitLimits_N()` 或上层策略时才会发送 `0xF0`。
-- Type7 海泰可在 `type` 中填写具体型号并自动使用 MIT 默认限幅：`HT2205` 为 `95.5rad / 125.66rad/s / 0.06Nm`，`HT3505-J8` 为 `95.5rad / 32.04rad/s / 0.85Nm`，`HT4305` / `HT4305-J10` 为 `95.5rad / 41.89rad/s / 3.0Nm`，`HT4310-J10` 为 `95.5rad / 31.42rad/s / 1.0Nm`，`HT6010-J6` 为 `95.5rad / 70.16rad/s / 9.0Nm`。未知型号回退到协议默认 `95.5rad / 45rad/s / 18Nm`；TOML 中显式填写的 `p/v/t/kp/kd` 字段始终优先覆盖内置默认值。
+- `api_type=8`（ENCOS / 因克斯 EC-A）使用经典标准 CAN 帧；`SetMode_N()` 支持 `0` MIT 混控、`1` 位置、`2` 速度、`3` 力矩。模式 1/2 下命令的 `torque` 字段表示电流限制（A），模式 0/3 下表示转矩（N·m）。反馈电流按型号电流范围解码，转矩按型号转矩常数换算。
+- `api_type=9`（JC 系列）使用标准 CAN 帧；`SetMode_N()` 支持 `1~5`，其中 `1` 走速度命令、`5` 走力矩命令，`2~4` 按位置命令发送。`type = "JC"` 时会自动给出基础映射范围，`kp_in_use/kd_in_use` 可省略。
+- JC 协议资料中没有明确的清错写命令；`ClearError_N()` 会触发一次故障寄存器查询并返回失败，避免上层把“已查询”误判为“已清除”。
+- Type1/3/7/8 的型号参数按仓库内对应厂商协议维护：灵足/富兴支持 `RS00`~`RS06`、`CyberGear`；ENCOS/因克斯支持 `EC-A8112-P1-18`、`EC-A4310-P2-36`、`EC-A4315-P2-36`、`EC-A6408-P2-25`、`EC-A6416-P2-25`、`EC-A10020-P1-12`、`EC-A10020-P2-24`、`EC-A13715-P1-12.67`、`EC-A13720-P1-11.4`；达妙/达秒支持 `DM4310`、`DM4310_48V`、`DM4340`、`DM4340_48V`、`DM6006`、`DM8006`、`DM8009`、`DM10010L`、`DM10010`、`DMH3510`、`DMH6215`、`DMG6220`。
+- 对 Type1/2/3/7/8，`kp_in_use` 和 `kd_in_use` 仍建议显式保留在 TOML 中，便于现场调参。Type9 当前不使用 `kp/kd`，可省略。`p/v/t/kp/kd` 的 `min/max` 可由型号表自动填写，也可以在 TOML 中显式覆盖。
+- `api_type=7`（海泰 Rev.3.07b0）默认将 `send.mode=0` 映射为 `0xC2` 绝对位置控制；`SetMode_N()` 支持 `0` 绝对位置、`1` 电流、`2` 速度、`3` 相对位置、`4` MIT 模式。模式 1 需要配置有效的 `current_min/current_max`，缺失时命令会失败。普通查询交替使用 `0xA4` 复合状态和 `0xA3` 多圈位置。进入 MIT 模式后驱动先用单字节 `0xF0` 读取电机实际映射范围，在收到合法响应前拒绝发送 MIT 命令；`ConfigureHaitaiMitLimits_N()` 才会主动写入一组映射范围。
+- Type7 海泰可在 `type` 中填写具体型号并自动加载命令限幅：`HT2205` 为 `95.5rad / 125.66rad/s / 0.06Nm`，`HT3505-J8` 为 `95.5rad / 32.04rad/s / 0.85Nm`，`HT4305` / `HT4305-J10` 为 `95.5rad / 41.89rad/s / 3.0Nm`，`HT4310-J10` 为 `95.5rad / 31.42rad/s / 1.0Nm`，`HT6010-J6` 为 `95.5rad / 70.16rad/s / 9.0Nm`。未知型号必须显式填写完整映射；TOML 显式字段优先覆盖型号表。MIT 帧本身仍以电机 `0xF0` 回读的实际范围编码和解码。
 - `p/v/t/kp/kd` 的 `min/max` 既用于发送映射，也用于接收反解（不同 `api_type` 有差异，但都依赖这些边界）。
 - `kp_in_use`、`kd_in_use` 会在初始化时拷贝到每个电机的发送缓存，后续可再通过接口动态修改。
-- `pos_min`、`pos_max` 用于 `Move/Move_N` 的发送前限幅；若 `pos_min >= pos_max`，限幅逻辑会被跳过（等价于不启用软限位）。
-- `api_type=1`（灵足/富兴）`SetMode_N(..., 2)` 会切到速度模式；随后 `Move_N()` 使用 `cmd.v` 写入 `0x700A spd_ref`，使用 `abs(cmd.t)` 写入 `0x7018 limit_cur`（未填写或为 0 时使用配置中的正向 `t_max`，并限制到协议 `0~43A`）。其他模式仍使用通信类型 1 的运控/MIT 帧。
+- `pos_min < pos_max` 时作为关节位置软限位；两者都为 `0` 时使用协议位置范围。其他无效组合会在配置加载时被拒绝。
+- `api_type=1`（灵足/富兴）当前只接受模式 `0`（运控/MIT）和 `2`（速度）。速度模式下 `Move_N()` 使用 `cmd.v` 写入 `0x700A spd_ref`，使用显式非零的 `abs(cmd.t)` 写入 `0x7018 limit_cur`；该值会按型号电流上限限幅，省略或为 `0` 时命令失败。模式 `1/3` 尚未实现完整命令路径，因此会明确返回失败，不会误发 MIT 帧。
 
 Type5 当前内置的常见型号系数：`M3536_32`、`M4438_30`、`M4438_32`、`M4538_19`、`M5043_20`、`M5046_20`、`M5047_09`、`M5047_36`、`M6056_36`、`M7256_35`、`M60SG_35`、`M60BM_35`。
 
@@ -301,11 +270,9 @@ ENCOS / 因克斯（按型号自动加载 MIT 映射范围）：{num = 8, name =
 
 高擎（推荐填写具体型号）：{num = 7, name = "R_Arm", type = "M4438_30", api_type = 5, chan = 1, canid = 1,  kp_in_use = 150, kd_in_use = 0.2 }
 
-PFL28（位置+电流控制）：{num = 11, name = "R_PUSHROD", type = "PFL28", api_type = 6, chan = 0, canid = 1, p_min = 0.0, p_max = 9.5, t_min = 0.0, t_max = 2.5, pos_min = 0.0, pos_max = 9.5}
 
 海泰（按具体型号加载 MIT 默认限幅）：{num = 21, name = "R_HT_1", type = "HT3505-J8", api_type = 7, chan = 1, canid = 1, kp_in_use = 20.0, kd_in_use = 0.8, pos_min = -6.28, pos_max = 6.28}
 
-飞特 SCS0037-C001（Type4 串口舵机，不走 SocketCAN）：{num = 31, name = "FT_SERVO_1", type = "SCS0037-C001", api_type = 4, port = "/dev/ttyUSB0", baud = 500000, canid = 1, kp_in_use = 0.0, kd_in_use = 0.0, pos_min = 0.0, pos_max = 4.712389}
 
 JC 系列（Type9 标准 CAN 舵机）：{num = 41, name = "JC_SERVO_1", type = "JC", api_type = 9, chan = 1, canid = 1, pos_min = -1.5708, pos_max = 1.5708}
 
@@ -320,11 +287,11 @@ source install/setup.bash
 - `lib/libkhcan_driver.so`：可被其他工程链接的驱动库
 - `include/*.hpp`：公开头文件
 - `share/khcan/config/motor.toml`：默认配置文件
-- `share/khcan/launch/motor_driver.launch.py`：整体底层驱动启动文件
+- `share/khcan/config/m4.toml`、`share/khcan/config/k1.toml`：本体配置文件
+- `share/khcan/launch/*.launch.py`：通用及 M4/K1 bringup 启动文件
 - `ros2 run khcan show_status`
 - `ros2 run khcan motor_driver_node`
 - `ros2 run khcan test_mit_mode`
-- `ros2 run khcan test_rs01_speed_swing`
 
 ### 作为驱动库植入其他工程
 在下游 ROS 2 包中可直接 `find_package(khcan)` 并链接导出的 CMake target：
@@ -333,7 +300,7 @@ find_package(khcan REQUIRED)
 
 add_executable(my_controller src/my_controller.cpp)
 target_link_libraries(my_controller
-  khcan::khcan_driver
+  khcan_driver
 )
 ```
 
@@ -378,17 +345,17 @@ ros2 run khcan motor_driver_node --ros-args \
   -p config:=/absolute/path/to/motor.toml \
   -p rate_hz:=100.0 \
   -p auto_enable:=false \
-  -p default_mode:=-1
+  -p default_mode:=-1 \
+  -p command_timeout_ms:=100 \
+  -p feedback_timeout_ms:=500
 ```
 
 诊断工具仍可单独运行：
 ```bash
 ros2 run khcan show_status
 ros2 run khcan test_mit_mode
-ros2 run khcan test_rs01_speed_swing --wheel-speed 2.0 --wheel-current 3.0 --amp 0.20 --freq 0.25
 ```
 
-PFL28 独立排障入口已删除。Type6/PFL28 驱动仍保留在库中，业务代码请通过 `BaseRobot` 直接发送位置/电流命令。
 
 ## CAN 接口准备
 程序依赖 `motor.toml` 中声明的 `canX` 接口。
@@ -425,12 +392,6 @@ Type5 MIT 默认使用 **CAN FD 且不带 BRS**（兼容性更好）。
 
 Type5 `mode=0` 使用 MIT2 组合帧（设模式 + 写 `pos/vel/tqe` + 写 `kp/kd` + 查询状态），回包会解析 `0x24/0x28/0x2C`（并兼容 `0x27`）。
 
-PFL28（Type6）建议按 CAN FD 配置：
-```bash
-sudo ip link set can0 type can bitrate 1000000 sample-point 0.8 dbitrate 5000000 dsample-point 0.75 fd on
-sudo ip link set can0 up
-```
-Type6 默认采用智元/Xyber 风格：标准 ID `0` 的 64 字节 CAN FD 广播帧，同一 CAN 设备上的 PFL28 会按 `canid - 1` 一起写入 8 字节槽位：`position(float32 LE)` + `current(float32 LE)`。如需退回 P2P 标准 ID `canid` + 8 字节帧，可设置 `PFL28_XYBER_MODE=0`。
 
 代码中也会在接口存在但未启动时尝试拉起接口；如果权限不足，会提示你：
 - 使用 `sudo` 运行程序
@@ -458,8 +419,9 @@ ros2 run khcan show_status --clear-errors --enable
 ## 常见问题
 - `ament_index_cpp::get_package_share_directory("khcan")` 找不到包：
   先确认已经执行过：
+  ```bash
   source install/setup.bash
-```raw
+  ```
 - 修改了 `config/motor.toml` 但运行结果没变化：
   若未使用 `--symlink-install`，请重新编译并重新 `source`。
 - 报错 `canX` 打不开：
@@ -469,5 +431,3 @@ ros2 run khcan show_status --clear-errors --enable
   Type5 MIT 下可优先确认 `HQ_CANFD_BRS`（默认不设置即关闭），并适当增大 `txqueuelen`。
 - `test_mit_mode` 有发送但电机不动、`p/v/t` 长时间不变：
   常见是总线未应答（波特率/BRS/接线/CAN ID不一致）。建议先抓包确认是否有电机回包，再核对 `type` 是否填写为具体型号（Type5 下影响力矩与增益缩放）。
-
-```
