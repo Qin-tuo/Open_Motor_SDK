@@ -1086,7 +1086,9 @@ bool DeviceX::openSocket(const std::string& iface, bool enable_canfd, int dbitra
     addr.can_family = AF_CAN;
     addr.can_ifindex = ifr.ifr_ifindex;
 
-    if (bind(socket_fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
+    if (::bind(socket_fd.load(),
+           reinterpret_cast<struct sockaddr*>(&addr),
+           sizeof(addr)) < 0) {
         std::perror("bind");
         close(socket_fd);
         socket_fd = -1;

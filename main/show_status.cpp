@@ -23,11 +23,12 @@ void handleSignal(int) {
 
 void printUsage(const char* argv0) {
     std::cout
-        << "Usage: " << argv0 << " [options] [motor.toml]\n"
+        << "Usage: " << argv0 << " [options] [config]\n"
         << "\n"
         << "Default mode is status query only: no disable, no clear-error, no enable.\n"
         << "\n"
         << "Options:\n"
+        << "  --config, -c <value>   Config path or installed config name (for example m4)\n"
         << "  --resolve-config-only   Print resolved config path and exit without opening CAN\n"
         << "  --hz <value>            Query/print rate, default 10\n"
         << "  --clear-errors          Send clear-error before monitoring\n"
@@ -37,29 +38,45 @@ void printUsage(const char* argv0) {
         << "  --help                  Show this message\n";
 }
 
-std::string defaultConfigPath() {
+std::filesystem::path packageConfigDirectory() {
+    try {
+        const std::string package_share_directory =
+            ament_index_cpp::get_package_share_directory("khcan");
+        return std::filesystem::path(package_share_directory) / "config";
+    } catch (const std::exception&) {
+        const std::filesystem::path local_motor_driver = "src/motor_driver/config";
+        if (std::filesystem::is_directory(local_motor_driver)) {
+            return local_motor_driver;
+        }
+        const std::filesystem::path local_khcan = "src/khcan/config";
+        if (std::filesystem::is_directory(local_khcan)) {
+            return local_khcan;
+        }
+        throw;
+    }
+}
+
+std::string resolveConfigPath(const std::string& selection) {
+    if (!selection.empty()) {
+        const std::filesystem::path supplied(selection);
+        if (std::filesystem::exists(supplied) || supplied.is_absolute() ||
+            supplied.has_parent_path()) {
+            return selection;
+        }
+
+        std::filesystem::path filename = supplied;
+        if (!filename.has_extension()) {
+            filename += ".toml";
+        }
+        return (packageConfigDirectory() / filename).string();
+    }
+
     if (const char* env_path = std::getenv("KHCAN_CONFIG_PATH")) {
         if (env_path[0] != '\0') {
             return env_path;
         }
     }
-
-    try {
-        const std::string package_share_directory =
-            ament_index_cpp::get_package_share_directory("khcan");
-        return package_share_directory + "/config/motor.toml";
-    } catch (const std::exception&) {
-        const std::filesystem::path local_motor_driver =
-            "src/motor_driver/config/motor.toml";
-        if (std::filesystem::exists(local_motor_driver)) {
-            return local_motor_driver.string();
-        }
-        const std::filesystem::path local_khcan = "src/khcan/config/motor.toml";
-        if (std::filesystem::exists(local_khcan)) {
-            return local_khcan.string();
-        }
-        throw;
-    }
+    return (packageConfigDirectory() / "motor.toml").string();
 }
 
 double parsePositiveDouble(const std::string& value, const std::string& option_name) {
@@ -110,6 +127,26 @@ int main(int argc, char** argv) {
                 disable_on_exit = true;
                 continue;
             }
+            if (arg == "--config" || arg == "-c") {
+                if (i + 1 >= argc) {
+                    throw std::invalid_argument(arg + " requires a value");
+                }
+                if (!config_path.empty()) {
+                    throw std::invalid_argument("multiple configs were provided");
+                }
+                config_path = argv[++i];
+                continue;
+            }
+            if (arg.rfind("--config=", 0) == 0) {
+                if (!config_path.empty()) {
+                    throw std::invalid_argument("multiple configs were provided");
+                }
+                config_path = arg.substr(std::string("--config=").size());
+                if (config_path.empty()) {
+                    throw std::invalid_argument("--config requires a value");
+                }
+                continue;
+            }
             if (arg == "--hz") {
                 if (i + 1 >= argc) {
                     throw std::invalid_argument("--hz requires a value");
@@ -126,9 +163,7 @@ int main(int argc, char** argv) {
             config_path = arg;
         }
 
-        if (config_path.empty()) {
-            config_path = defaultConfigPath();
-        }
+        config_path = resolveConfigPath(config_path);
     } catch (const std::exception& ex) {
         std::cerr << "[show_status] argument error: " << ex.what() << std::endl;
         printUsage(argv[0]);

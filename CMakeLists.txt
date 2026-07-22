@@ -122,6 +122,13 @@ if(BUILD_TESTING)
   add_test(NAME driver_core COMMAND test_driver_core ${CMAKE_CURRENT_SOURCE_DIR}/config/motor.toml)
   add_test(NAME config_m4 COMMAND test_driver_core ${CMAKE_CURRENT_SOURCE_DIR}/config/m4.toml)
   add_test(NAME config_k1 COMMAND test_driver_core ${CMAKE_CURRENT_SOURCE_DIR}/config/k1.toml)
+  add_test(
+    NAME show_status_explicit_config
+    COMMAND show_status --resolve-config-only --config ${CMAKE_CURRENT_SOURCE_DIR}/config/m4.toml
+  )
+  set_tests_properties(show_status_explicit_config PROPERTIES
+    PASS_REGULAR_EXPRESSION "\\[show_status\\] config: .*config/m4.toml"
+  )
 endif()
 
 ament_package()

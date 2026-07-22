@@ -8,7 +8,7 @@
 当前包会安装可复用驱动库 `libkhcan_driver.so`，其他 ROS 2 工程可直接链接该库进行控制；也提供单进程整体底层驱动节点 `motor_driver_node`，一次读取完整 `motor.toml`，再按 CAN 通道暴露 `/canX/...` 接口给上层控制。
 当前仓库中可用的入口程序有：
 - `motor_driver_node`：整体底层驱动节点，读取完整 TOML 后统一管理所有电机，并按通道提供 ROS 2 topic/service
-- `show_status`：从 `config/motor.toml` 读取配置，默认只周期性查询所有电机状态；清错、使能、退出失能必须显式加参数
+- `show_status`：可选择 M4/K1/自定义 TOML，默认只周期性查询所有电机状态；清错、使能、退出失能必须显式加参数
 - `test_mit_mode`：根据 `api_type` 自动切换到 MIT 模式（Type1/2/3/5/8），对单个电机执行正弦摆动测试
 
 ## 整体底层驱动节点
@@ -353,6 +353,8 @@ ros2 run khcan motor_driver_node --ros-args \
 诊断工具仍可单独运行：
 ```bash
 ros2 run khcan show_status
+ros2 run khcan show_status --config m4
+ros2 run khcan show_status --config k1
 ros2 run khcan test_mit_mode
 ```
 
@@ -366,18 +368,23 @@ ros2 run khcan test_mit_mode
 sudo ip link set can1 type can bitrate 1000000
 sudo ip link set can1 up
 
+sudo ip link set can2 down
 sudo ip link set can2 type can bitrate 1000000
 sudo ip link set can2 up
 
+sudo ip link set can3 down
 sudo ip link set can3 type can bitrate 1000000
 sudo ip link set can3 up
 
+sudo ip link set can4 down
 sudo ip link set can4 type can bitrate 1000000
 sudo ip link set can4 up
 
+sudo ip link set can5 down
 sudo ip link set can5 type can bitrate 1000000
 sudo ip link set can5 up
 
+sudo ip link set can6 down
 sudo ip link set can6 type can bitrate 1000000
 sudo ip link set can6 up
 ```
@@ -401,6 +408,18 @@ Type5 `mode=0` 使用 MIT2 组合帧（设模式 + 写 `pos/vel/tqe` + 写 `kp/k
 `show_status` 默认 10 Hz，可通过参数调整：
 ```bash
 ros2 run khcan show_status --hz 20
+```
+
+按本体选择安装在 `share/khcan/config` 中的 TOML：
+```bash
+ros2 run khcan show_status --config m4
+ros2 run khcan show_status --config k1.toml
+```
+
+自定义配置使用完整路径；原有的位置参数写法仍然兼容：
+```bash
+ros2 run khcan show_status --config /absolute/path/to/custom.toml
+ros2 run khcan show_status /absolute/path/to/custom.toml
 ```
 
 默认只查询状态。如果确认现场安全并且需要清错/使能：
