@@ -192,7 +192,6 @@ struct Motor_CAN_Info_Struct
     float torque_constant;
     float kp_in_use, kd_in_use;
     float pos_min, pos_max;
-    int initial_mode;
     
 };
 

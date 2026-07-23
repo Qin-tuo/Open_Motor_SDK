@@ -57,13 +57,6 @@ BaseRobot::BaseRobot(const std::string& config_file, bool disable_on_destroy)
         devices_[device_index] = std::move(device);
     }
 
-    for (int i = 0; i < static_cast<int>(motors_.size()); ++i) {
-        const int mode = motors_[i].info.initial_mode;
-        if (mode >= 0 && !SetMode_N(i, mode)) {
-            throw std::runtime_error("Failed to set initial mode for " +
-                                     motors_[i].info.name);
-        }
-    }
 }
 
 BaseRobot::~BaseRobot() {

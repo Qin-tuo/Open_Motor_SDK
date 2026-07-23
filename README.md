@@ -154,7 +154,7 @@ M4/K1 bringup 会分别读取 `share/khcan/config/m4.toml` 和
 config/*.toml
 ```
 
-多本体共用同一套驱动代码和型号表，本体 TOML 只保存该本体的关节名称、逻辑编号、CAN 路由、现场增益、软限位和初始模式。不要为每个本体复制驱动代码，也不要把 K1/M4 的路由合并进一个配置；bringup 通过 `config` 参数选择单份 TOML。新增本体时新增 `config/<body>.toml`，并复用 `motor_driver.launch.py` 即可。
+多本体共用同一套驱动代码和型号表，本体 TOML 只保存该本体的关节名称、逻辑编号、CAN 路由、现场增益和软限位。不要为每个本体复制驱动代码，也不要把 K1/M4 的路由合并进一个配置；bringup 通过 `config` 参数选择单份 TOML。新增本体时新增 `config/<body>.toml`，并复用 `motor_driver.launch.py` 即可。
 
 每个 TOML 中 `motors = [ {...}, {...} ]` 的每个内联表代表 1 个电机。
 程序会按 `src/config_loader.cpp` 读取以下字段；身份和路由字段必须填写，
@@ -186,7 +186,6 @@ config/*.toml
 | `kd_in_use` | 上电默认使用的 `kd` | 浮点，必须在映射范围内 | 是 |
 | `pos_min` | 运行时位置软限位最小值 | 通常 rad | 间接（发送前限幅） |
 | `pos_max` | 运行时位置软限位最大值 | 通常 rad | 间接（发送前限幅） |
-| `initial_mode` | 创建 CAN 设备后设置的初始模式；省略表示不主动设置 | 必须是对应 `api_type` 支持的模式 | 是（初始化时设置模式） |
 
 ### 字段精简规则
 
@@ -196,7 +195,7 @@ config/*.toml
 - 已知 ENCOS/RS 型号的 `current_min/current_max` 以及 ENCOS 的 `torque_constant` 同样由型号表补齐。未知型号只有在需要电流型命令或电流反馈时才显式填写；缺少有效电流范围时，驱动拒绝对应命令而不是使用错误单位发送。
 - 未知型号必须提供完整映射边界。K1 的 `EC-A6416-P2-25` 已进入型号表：位置 `±12.5 rad`、速度 `±18 rad/s`、KP `0~500`、KD `0~5`、MIT/力矩范围 `±120 N·m`、反馈电流范围 `±60 A`、转矩常数 `2.74 N·m/A`。这些是不同物理量，不能互相代替。
 - `pos_min`、`pos_max` 只在 `pos_min < pos_max` 时启用软限位；两者均为 `0` 与省略等价，应直接省略。
-- M4/K1 的已知型号不在 TOML 中重复填写 `p/v/kp/kd/t/current` 型号常量；RS00 使用型号表的 `-14~14 N·m`。轮毂 RS01 只额外填写 `initial_mode = 2`，使 bringup 后进入速度模式。
+- M4/K1 的已知型号不在 TOML 中重复填写 `p/v/kp/kd/t/current` 型号常量；RS00 使用型号表的 `-14~14 N·m`。RS01 轮毂默认使用 Type1 的 MIT 模式 `0`。
 
 ### ENCOS 型号表
 

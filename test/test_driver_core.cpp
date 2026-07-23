@@ -105,9 +105,6 @@ int main(int argc, char** argv) {
                 assert(motor.current_min == -60.0f && motor.current_max == 60.0f);
                 assert(motor.torque_constant == 2.74f);
             }
-            if (motor.name.find("wheel_joint") != std::string::npos) {
-                assert(motor.initial_mode == 2);
-            }
         }
     }
 

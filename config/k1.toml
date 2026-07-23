@@ -13,11 +13,11 @@ motors = [
   { num = 11, name = "right_hip_roll_joint",  type = "EC-A4315-P2-36", api_type = 8, chan = 5, canid =   2, kp_in_use = 20, kd_in_use = 0.8 },
   { num = 12, name = "right_hip_pitch_joint", type = "EC-A6408-P2-25", api_type = 8, chan = 5, canid =   1, kp_in_use = 20, kd_in_use = 0.8 },
   { num = 13, name = "right_calf_joint",      type = "EC-A6416-P2-25", api_type = 8, chan = 5, canid =   4, kp_in_use = 20, kd_in_use = 0.8 },
-  { num = 14, name = "right_wheel_joint",     type = "RS01",            api_type = 1, chan = 6, canid = 127, kp_in_use = 20, kd_in_use = 0.8, initial_mode = 2 },
+  { num = 14, name = "right_wheel_joint",     type = "RS01",            api_type = 1, chan = 6, canid = 127, kp_in_use = 20, kd_in_use = 0.8 },
 
   { num = 15, name = "left_hip_yaw_joint",   type = "EC-A4310-P2-36", api_type = 8, chan = 2, canid =   3, kp_in_use = 20, kd_in_use = 0.8 },
   { num = 16, name = "left_hip_roll_joint",  type = "EC-A4315-P2-36", api_type = 8, chan = 2, canid =   2, kp_in_use = 20, kd_in_use = 0.8 },
   { num = 17, name = "left_hip_pitch_joint", type = "EC-A6408-P2-25", api_type = 8, chan = 2, canid =   1, kp_in_use = 20, kd_in_use = 0.8 },
   { num = 18, name = "left_calf_joint",      type = "EC-A6416-P2-25", api_type = 8, chan = 2, canid =   4, kp_in_use = 20, kd_in_use = 0.8 },
-  { num = 19, name = "left_wheel_joint",     type = "RS01",            api_type = 1, chan = 1, canid = 127, kp_in_use = 20, kd_in_use = 0.8, initial_mode = 2 },
+  { num = 19, name = "left_wheel_joint",     type = "RS01",            api_type = 1, chan = 1, canid = 127, kp_in_use = 20, kd_in_use = 0.8 },
 ]

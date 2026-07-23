@@ -189,12 +189,6 @@ void validate_motor(const Motor_CAN_Info_Struct& motor, int index) {
         throw std::runtime_error("Motor entry " + std::to_string(index) +
                                  ": gains and torque constant must be valid");
     }
-    if (motor.initial_mode >= 0 &&
-        !motor_mode_supported(motor.api_type, motor.initial_mode)) {
-        throw std::runtime_error("Motor entry " + std::to_string(index) +
-                                 ": initial_mode is not supported by api_type " +
-                                 std::to_string(motor.api_type));
-    }
     if (motor.kp_in_use < motor.kp_min || motor.kp_in_use > motor.kp_max ||
         motor.kd_in_use < motor.kd_min || motor.kd_in_use > motor.kd_max) {
         throw std::runtime_error("Motor entry " + std::to_string(index) +
@@ -301,7 +295,6 @@ std::vector<Motor_CAN_Info_Struct> MotorConfigLoader::loadConfig(const std::stri
         m.torque_constant = 0.0f;
         m.kp_in_use = 20.0f; m.kd_in_use = 0.8f;
         m.pos_min = 0.0f;  m.pos_max = 0.0f;
-        m.initial_mode = -1;
 
         if (m.api_type == 9) {
             m.kp_in_use = 0.0f;
@@ -341,7 +334,6 @@ std::vector<Motor_CAN_Info_Struct> MotorConfigLoader::loadConfig(const std::stri
             get_val(m.kd_in_use, "kd_in_use", gains_required);
             get_val(m.pos_min, "pos_min", false);
             get_val(m.pos_max, "pos_max", false);
-            get_val(m.initial_mode, "initial_mode", false);
 
             if (!compact_mit_config) {
                 get_val(m.p_min, "p_min");
@@ -374,7 +366,6 @@ std::vector<Motor_CAN_Info_Struct> MotorConfigLoader::loadConfig(const std::stri
             get_val(m.current_min, "current_min", false);
             get_val(m.current_max, "current_max", false);
             get_val(m.torque_constant, "torque_constant", false);
-            get_val(m.initial_mode, "initial_mode", false);
         }
 
         validate_motor(m, index);
